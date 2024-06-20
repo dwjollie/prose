@@ -164,39 +164,41 @@ class Equation(Encoder):
         """
         Decode list of symbols in prefix notation into a tree
         """
+        #The idea for now is to instead turn res into a final Sympy expression by modifying lst until it is one expression?
+
         if len(lst) == 0:
             return None, 0
         elif "OOD" in lst[0]:
             return None, 0
         elif lst[0] in self.all_operators.keys():
-            res = Node(lst[0], self.params)
+            res = [lst[0]]
             arity = self.all_operators[lst[0]]
             pos = 1
             for i in range(arity):
                 child, length = self._decode(lst[pos:])
                 if child is None:
                     return None, pos
-                res.push_child(child)
+                res.append(child)
                 pos += length
             return res, pos
         elif lst[0].startswith("INT"):
             val, length = self.parse_int(lst)
-            return Node(str(val), self.params), length
+            return str(val), length
         elif lst[0] == "+" or lst[0] == "-":
             try:
                 val = self.float_encoder.decode(lst[:3])[0]
             except Exception as e:
                 # print(e, "error in encoding, lst: {}".format(lst))
                 return None, 0
-            return Node(str(val), self.params), 3
+            return str(val), 3
         elif lst[0].startswith("CONSTANT") or lst[0] == "y":  ##added this manually CAREFUL!!
-            return Node(lst[0], self.params), 1
+            return lst[0], 1
         elif lst[0] in self.symbols:
-            return Node(lst[0], self.params), 1
+            return lst[0], 1
         else:
             try:
                 float(lst[0])  # if number, return leaf
-                return Node(lst[0], self.params), 1
+                return lst[0], 1
             except:
                 return None, 0
 

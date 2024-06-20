@@ -32,6 +32,7 @@ operators_real = {
     "pow": 2,
     "pow2": 1,
     "pow3": 1,
+    "diff": 2
 }
 
 operators_extra = dict()
