@@ -5,16 +5,19 @@ import scipy.special
 from logging import getLogger
 from scipy.integrate import solve_ivp
 from jax import numpy as jnp
+from sympy.parsing.sympy_parser import untokenize, generate_tokens, parse_expr
+import io
 
 logger = getLogger()
 
 try:
     from symbolicregression.envs.node_utils import Node, NodeList
 except:
-    from node_utils import Node,NodeList
-#from symbolicregression.envs.ode_generator import ODEGenerator
+    from node_utils import Node, NodeList
+# from symbolicregression.envs.ode_generator import ODEGenerator
 
 import sympy as sy
+
 
 def sympy_to_lists(expr):
     term_list = []
@@ -25,9 +28,10 @@ def sympy_to_lists(expr):
         op_list.append(ops)
     return term_list, op_list
 
-def get_dim(term_list,op_list):
+
+def get_dim(term_list, op_list):
     function_list = []
-    argus_list =[]
+    argus_list = []
     dim_list = []
     for i in range(len(op_list)):
         if str(op_list[i]).startswith('u') and term_list[i] not in function_list:
@@ -40,14 +44,14 @@ def get_dim(term_list,op_list):
         argus = '(' + fun[1]
         argus_list.append(argus)
         dim_list.append(dim)
-    
+
     return argus_list, dim_list
 
 
 def the_remover(term_list, op_list):
-    argus, dim = get_dim(term_list,op_list)
+    argus, dim = get_dim(term_list, op_list)
     sym_tup = lambda num: sy.symbols('t, x:{}'.format(num))
-    create_args = len(sy.sympify(argus[0]))-1     #don't factor t into this.
+    create_args = len(sy.sympify(argus[0])) - 1  # don't factor t into this.
     args = sym_tup(create_args)
     args = str(args).split('(')
     args = args[1].split(')')
@@ -55,10 +59,10 @@ def the_remover(term_list, op_list):
 
     u = lambda numb, args: sy.Function('u_{}'.format(numb))(args)
     for ii in range(len(op_list)):
-        for numb in dim:    
-            if op_list[ii] == type(sy.sympify(u(numb,args))):
-                part_to_remove = create_args+1  #+1 for t.
-                for j in range(ii+1,ii+part_to_remove+1):   #+1 for next term.
+        for numb in dim:
+            if op_list[ii] == type(sy.sympify(u(numb, args))):
+                part_to_remove = create_args + 1  # +1 for t.
+                for j in range(ii + 1, ii + part_to_remove + 1):  # +1 for next term.
                     term_list[j] = 0
                     op_list[j] = 0
     term_list_final = []
@@ -74,7 +78,7 @@ def the_remover(term_list, op_list):
 
 def check_tree_for_derivatives(term_list, op_list):
     """
-    This is going to go into the tree_from_sympy function to check the args and see if we need to change it to 
+    This is going to go into the tree_from_sympy function to check the args and see if we need to change it to
     a derivative/function. i.e. say we are multiplying ux and u, for the encoder to read that, we need
     self.mul_terms(["ux_0","u_0"])
 
@@ -87,29 +91,30 @@ def check_tree_for_derivatives(term_list, op_list):
     and a new term and operator list for the trees.
     """
     x, t = sy.symbols('x t')
-    u = sy.Function('u_0')(x,t)
+    u = sy.Function('u_0')(x, t)
     max_list = len(op_list)
     deriv_args = []
-    op_list_final=[]
-    term_list_final =[]
+    op_list_final = []
+    term_list_final = []
 
     for ii in reversed(range(max_list)):
-        if op_list[ii] == type(sy.Derivative(u,x)):
-            fxn = op_list[ii+1] #get dim from this as well
-            j = ii+2
+        if op_list[ii] == type(sy.Derivative(u, x)):
+            fxn = op_list[ii + 1]  # get dim from this as well
+            j = ii + 2
             deriv_tup = []
-            term_list[ii+1]=0 #remove function argument from tree
-            op_list[ii+1]=0
+            term_list[ii + 1] = 0  # remove function argument from tree
+            op_list[ii + 1] = 0
             while j < max_list:
-                if op_list[j] == type(sy.sympify((2,u))):
+                if op_list[j] == type(sy.sympify((2, u))):
                     deriv_tup.append(term_list[j])
                     len_tup = len(term_list[j])
-                    for jj in range(j,1 + len_tup + j): #remove tuple (+1) then remove the args of tuple (+len_tup)
-                        term_list[jj] = 0    #remove tuple and number argument from tree
+                    for jj in range(j, 1 + len_tup + j):  # remove tuple (+1) then remove the args of tuple (+len_tup)
+                        term_list[jj] = 0  # remove tuple and number argument from tree
                         op_list[jj] = 0
-                elif op_list[j] != type((x,2)) and op_list[j] != type(sy.sympify(2)) and op_list[j] != type(sy.sympify(1)) and op_list[j] != 0: #may cause an issue if we have ux * const, but idk
+                elif op_list[j] != type((x, 2)) and op_list[j] != type(sy.sympify(2)) and op_list[j] != type(
+                        sy.sympify(1)) and op_list[j] != 0:  # may cause an issue if we have ux * const, but idk
                     break
-                j = j + 1   
+                j = j + 1
             deriv_args.append((deriv_tup, fxn))
 
     for i in range(max_list):
@@ -117,8 +122,8 @@ def check_tree_for_derivatives(term_list, op_list):
             term_list_final.append(term_list[i])
             op_list_final.append(op_list[i])
 
-    
     return deriv_args, term_list_final, op_list_final
+
 
 def string_derivatives(deriv_args):
     """
@@ -133,34 +138,36 @@ def string_derivatives(deriv_args):
     str_deriv_list = []
     for ii in range(len(deriv_args)):
         fxn = str(deriv_args[ii][1])
-        indep_var = deriv_args[ii][0]    
+        indep_var = deriv_args[ii][0]
         for indep in indep_var:
             ind = str(indep[0])
             mult = indep[1]
-            str_deriv = 'd_' + ind*mult
+            str_deriv = 'd_' + ind * mult
         deriv_tup = (str_deriv, fxn)
         str_deriv_list.append(deriv_tup)
     return str_deriv_list
+
 
 def make_list_fancy(str_deriv_list, term_list, op_list):
     """
     This is going to make everything that needs to be a string in term_list into a string.
     """
     x, t = sy.symbols('x t')
-    u = sy.Function('u_0')(x,t)
+    u = sy.Function('u_0')(x, t)
     ind_list = []
 
     for i in reversed(range(len(op_list))):
-        if op_list[i] == type(sy.diff(u,x)):
+        if op_list[i] == type(sy.diff(u, x)):
             ind_list.append(i)
         if op_list[i] == type(u):
             term_list[i] = "u_0"
-        if op_list[i] == type(sy.sympify(2.3)): #may have to annoyingly add integers as well?
+        if op_list[i] == type(sy.sympify(2.3)):  # may have to annoyingly add integers as well?
             term_list[i] = str(term_list[i])
     for ii in range(len(ind_list)):
         ind = ind_list[ii]
         term_list[ind] = str_deriv_list[ii]
     return term_list
+
 
 """
     if op == (2 * x).func or op == (2 + x).func:
@@ -191,10 +198,8 @@ def make_list_fancy(str_deriv_list, term_list, op_list):
                     final_answer.append(str(arg))
     return final_answer
 """
-                    
 
-
-#def make_all_nodes(self,term_list,op_list):
+# def make_all_nodes(self,term_list,op_list):
 """
 This is just gonna go up the list and make a list of nodes then combine them.
 
@@ -202,6 +207,8 @@ We will need to think of a way to add the derivatives.
 
 I am pretty sure this is the same as what I was doing.
 """
+
+
 #    x,t = sy.symbols('x t')
 #    u = sy.Function('u_0')(x,t)
 #    p = self.params
@@ -228,75 +235,78 @@ def diff_terms(self, lst):
         else:
             tree = Node("diff", p, [Node(lst[i], p), tree])
     return tree
-            
+
+
 def tree_from_sympy(self, term_list, op_list):
     """
     Generate a PROSE tree from the sympy tree by iterating over the operations.
     """
-    #clean the term_list and op_list.
-    term_list, op_list = the_remover(term_list,op_list)
-    deriv_args, term_list, op_list = check_tree_for_derivatives(term_list,op_list)
+    # clean the term_list and op_list.
+    term_list, op_list = the_remover(term_list, op_list)
+    deriv_args, term_list, op_list = check_tree_for_derivatives(term_list, op_list)
     str_derivs = string_derivatives(deriv_args)
-    term_list = make_list_fancy(str_derivs,term_list,op_list)
+    term_list = make_list_fancy(str_derivs, term_list, op_list)
 
     p = self.params
-    dim = 0 #do the thing where we parse the dimension from u by splitting it at _ then do {'u_' + str(dim)} and check that. don't think we need this here.
+    dim = 0  # do the thing where we parse the dimension from u by splitting it at _ then do {'u_' + str(dim)} and check that. don't think we need this here.
     x, t = sy.symbols('x t')
-    final_term_list = term_list     #initialize
+    final_term_list = term_list  # initialize
     int_term_list = []
-    it = 0                          #just in case
+    it = 0  # just in case
 
-    while len(final_term_list) != 1 or it < 1000: 
+    while len(final_term_list) != 1 or it < 1000:
         itms = []
         tree = None
         for l in reversed(range(len(op_list))):
-            if op_list[l] == (x + 2).func:     #Note: x+2 is random.  We are just choosing a sympy function with addition.
+            if op_list[l] == (x + 2).func:  # Note: x+2 is random.  We are just choosing a sympy function with addition.
                 the_comb = len(term_list[l].args)
-                for ii in range(l+1, 1 + l + the_comb):  #+1 for the term after add, +the_comb for the total terms to move into the list.
+                for ii in range(l + 1,
+                                1 + l + the_comb):  # +1 for the term after add, +the_comb for the total terms to move into the list.
                     itms.append(term_list[ii])
                     final_term_list[ii] = 0
                 final_term_list[l] = self.add_terms(itms)
-            elif op_list[l] == (2*x).func:
+            elif op_list[l] == (2 * x).func:
                 """
                 Sympy treats division as multiplication, so we will have to check the args and if one of the args is 1/x
                 then we will have to do "div".  I need to see if we can check that. func for 1/x is pow...
                 """
                 the_comb = len(term_list[l].args)
-                for ii in range(l+1, 1 + l + the_comb):  #+1 for the term after add, +the_comb for the total terms to move into the list.
+                for ii in range(l + 1,
+                                1 + l + the_comb):  # +1 for the term after add, +the_comb for the total terms to move into the list.
                     itms.append(term_list[ii])
                     final_term_list[ii] = 0
                 final_term_list[l] = self.mul_terms(itms)
-            elif op_list[l] == (x**2).func:
+            elif op_list[l] == (x ** 2).func:
                 """
                 Here is another weird one.  We only really have pow2 and pow3.  I would again need to check the power args
                 and then try to raise it to the power.  I am just using the "pow" arg.
                 """
                 the_comb = len(term_list[l].args)
-                for ii in reversed(range(l+1,1 + l + the_comb)):
+                for ii in reversed(range(l + 1, 1 + l + the_comb)):
                     if tree is None:
                         tree = final_term_list[ii]
                     else:
-                        tree = Node("pow",p,[Node(final_term_list[ii],p), tree])
+                        tree = Node("pow", p, [Node(final_term_list[ii], p), tree])
                     final_term_list[ii] = 0
-            elif op_list[l] == type(sy.diff(u,x)):
+            elif op_list[l] == type(sy.diff(u, x)):
                 itms.append(term_list[l][0])
                 itms.append(term_list[l][1])
                 final_term_list[l] = self.diff_terms(itms)
             elif op_list[l] == type(sy.sin(x)):
                 the_comb = len(term_list[l].args)
-                for ii in reversed(range(l+1,1 + l + the_comb)):
+                for ii in reversed(range(l + 1, 1 + l + the_comb)):
                     if tree is None:
                         tree = final_term_list[ii]
                     else:
-                        tree = Node("sin",p,[Node(final_term_list[ii],p), tree])
+                        tree = Node("sin", p, [Node(final_term_list[ii], p), tree])
                     final_term_list[ii] = 0
             elif op_list[l] == type(sy.cos(x)):
                 the_comb = len(term_list[l].args)
-                for ii in reversed(range(l+1,1 + l + the_comb)):
+                for ii in reversed(range(l + 1, 1 + l + the_comb)):
                     if tree is None:
                         tree = final_term_list[ii]
                     else:
-                        tree = Node("cos",p,[Node(final_term_list[ii],p), tree])
+                        tree = Node("cos", p, [Node(final_term_list[ii], p), tree])
                     final_term_list[ii] = 0
 
             for jj in range(len(final_term_list)):
@@ -304,14 +314,15 @@ def tree_from_sympy(self, term_list, op_list):
                     int_term_list.append(final_term_list[jj])
             final_term_list = int_term_list
         it = it + 1
-        
+
     tree = final_term_list[0]
 
-def _decode(lst,all_operators,symbols):
+
+def _decode(lst, all_operators, symbols):
     """
     Decode list of symbols in prefix notation into a tree
     """
-    #The idea for now is to instead turn res into a final Sympy expression by modifying lst until it is one expression?
+    # The idea for now is to instead turn res into a final Sympy expression by modifying lst until it is one expression?
 
     if len(lst) == 0:
         return None, 0
@@ -322,31 +333,32 @@ def _decode(lst,all_operators,symbols):
         arity = all_operators[lst[0]]
         pos = 1
         for i in range(arity):
-            child, length = _decode(lst[pos:],all_operators,symbols)
+            child, length = _decode(lst[pos:], all_operators, symbols)
             if child is None:
                 return None, pos
-            try: 
+            try:
                 if child.startswith('u_'):
-                    x,t = sy.symbols('x t')
-                    u = lambda numb: sy.Function('u_{}'.format(numb))(x,t) #this can be changed to figure out how many spatial dimensions it takes in.
+                    x, t = sy.symbols('x t')
+                    u = lambda numb: sy.Function('u_{}'.format(numb))(x,
+                                                                      t)  # this can be changed to figure out how many spatial dimensions it takes in.
                     num = child.split('_')[1]
                     child = u(num)
             except:
                 pass
             res.append(child)
             pos += length
-        if res[0] == "diff":        #this fails if "diff" is not a leaf.
-            x,t = sy.symbols('x t')
-            u = sy.Function('u_0')(x,t)
-            #dim = res[2].split('_')[1]  #this is so we can expand in the future
+        if res[0] == "diff":  # this fails if "diff" is not a leaf.
+            x, t = sy.symbols('x t')
+            u = sy.Function('u_0')(x, t)
+            # dim = res[2].split('_')[1]  #this is so we can expand in the future
             try:
-                #res[2]= sy.sympify(res[2])
-                #res[2] = res[2].subs('u_{}'.format(dim),u)
+                # res[2]= sy.sympify(res[2])
+                # res[2] = res[2].subs('u_{}'.format(dim),u)
                 expr = res[2]
                 deriv = res[1].split('_')[1]
                 for args in deriv:
-                    expr = sy.diff(expr,args)
-                res[1] = expr 
+                    expr = sy.diff(expr, args)
+                res[1] = expr
                 res = res[1]
             except:
                 pass
@@ -371,6 +383,8 @@ def _decode(lst,all_operators,symbols):
             return lst[0], 1
         except:
             return None, 0
+
+
 def parse_int(lst):
     """
     Parse a list that starts with an integer.
@@ -388,10 +402,12 @@ def parse_int(lst):
         val = -val
     return val, i + 1
 
+
 def chunks(lst, n):
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
-        yield lst[i : i + n]
+        yield lst[i: i + n]
+
 
 def decode(lst):
     """
@@ -412,137 +428,67 @@ def decode(lst):
                 mant += x[1:]
             mant = int(mant)
             exp = int(val[-1][1:])
-            value = sign * mant * (10**exp)
+            value = sign * mant * (10 ** exp)
             value = float(value)
         except Exception:
             value = np.nan
         seq.append(value)
     return seq
-            
 
-def main():
-    c=1
-    x, t = sy.symbols('x t')
-    u = sy.Function('u_0')(x,t)
-    all_operators = {
-    "add": 2,
-    "sub": 2,
-    "mul": 2,
-    "div": 2,
-    "neg": 1,
-    # "abs": 1,
-    "inv": 1,
-    # "sqrt": 1,
-    # "log": 1,
-    # "exp": 1,
-    "sin": 1,
-    # "arcsin": 1,
-    "cos": 1,
-    # "arccos": 1,
-    # "tan": 1,
-    # "arctan": 1,
-    "pow": 2,
-    "pow2": 1,
-    "pow3": 1,
-    "diff": 2
-    }
-    variables = (
-    ["rand"]
-    + [f"u_{i}" for i in range(1)]
-    # + [f"x_{i}" for i in range(self.max_input_dimension)]
-    + ["d_t"]
-    + ["d_tt"]
-    + ["d_x"]
-    + ["d_xx"]
-    + ["d_xxx"]
-    + ["d_xxxx"]
-    # + ["u_i"]
-    # + ["u_i+1"]
-    # + ["u_i-1"]
-    + ["x"]
-    + ["t"]
-    # + ["u_n"]
-    # + ["u_n-1"]
-)
-    symbols = (variables
-        + ["|", "INT+", "INT-", "FLOAT+", "FLOAT-", "pow", "0"]
+
+def format_float_coefficients(expr):
+    # Extract the terms and their coefficients
+    terms = expr.as_ordered_terms()
+    coefficients = [term.as_coeff_Mul()[0] for term in terms]
+
+    # Format the coefficients: only convert floats to scientific notation
+    formatted_coefficients = [
+        '{:.2e}'.format(coef.evalf()) if coef.is_Float else str(coef)
+        for coef in coefficients
+    ]
+
+    # Reconstruct the expression with formatted coefficients
+    formatted_expr = ' + '.join(
+        f'{formatted_coef}*{term.as_coeff_Mul()[1]}' if term.as_coeff_Mul()[1] != 1 else formatted_coef
+        for formatted_coef, term in zip(formatted_coefficients, terms)
     )
 
-    #lst = ["sub","sub","mul","+","N100","E-2","ut_0","mul","+","N299","E-5","uxx_0","mul","+","N106","E-3","u_0"]
-    lst = ["sub","sub","mul","+","N100","E-2","diff","d_t","mul","4","u_0","mul","+","N299","E-5","diff","d_xx","u_0","mul","+","N106","E-3","u_0"]
-    tree = _decode(lst,all_operators, symbols)
-    #print(tree)
-    #print(np.array(tree))
-
-    #u1 = sy.Function('u_1')(x,t)
-    sin_gord = sy.diff(u,(t,2)) -c**2 * sy.diff(u,(x,2)) + c * sy.sin(u)
-    print(sy.srepr(sin_gord))
-    #print(u.args)
-    #delta = 0.022
-    #delta2 = delta**2
-    #kdv_expr = sy.diff(u,t) + delta2 * sy.diff(u,x,x,x) + u * sy.diff(u,x)
-    term_list, op_list = sympy_to_lists(sin_gord)
-    print(term_list)
-    print(op_list)
-    #argus, dim = get_dim(term_list,op_list)
-    #print(argus, dim)
-    #clean the term_list and op_list.
-    #print(term_list)
-    term_list, op_list = the_remover(term_list,op_list)
-    deriv_args, term_list, op_list = check_tree_for_derivatives(term_list,op_list)
-    str_derivs = string_derivatives(deriv_args)
-    term_list = make_list_fancy(str_derivs,term_list,op_list)
-    #print(str_derivs)
-    #print(deriv_args)
-    print(term_list, len(term_list))
-    print(op_list, len(op_list))
-    #tree = self.tree_from_sympy(term_list, op_list)
-
-    #print(deriv_args)
-    #print(str_derivs)
-    #print(term_list)
-    #print(op_list)
-    
-    #coeff = 1
-    #m = 4
-    #por_med_expr = coeff * sy.diff(u,t) - sy.diff(u**m,(x,2))
-    #print(por_med_expr)
-
-    #eps = 0.01
-    #cahnhillard_1D_expr = sy.diff(u,(t,2)) + eps **2 * sy.diff(u,(x,4)) + 6 * sy.diff((u * sy.diff(u,x)),x)
-    #print(cahnhillard_1D_expr)
-
-    #print(sy.Add(sy.sympify("+100E-3"),u))
-    #expr= sy.parse_expr("0.1+u_0")
-    #print(expr)
-    #print(expr.subs("u_0", u))
-    
+    return formatted_expr
 
 
+def main():
+    c = 0.02
 
+    x, t = sy.symbols('x t')
+    u = sy.Function('u_0')(x, t)
 
+    sin_gord = sy.diff(u, (t, 2)) - c ** 2 * sy.diff(u, (x, 2)) + c * sy.sin(u)
+    print("Origin sympy information")
+    print(sin_gord)
+    # Reconstruct the expression with formatted coefficients
+    formatted_expr = format_float_coefficients(sin_gord)
+    expression_str = str(formatted_expr)
+    print("Convert it to string:")
+    print(expression_str)
+    sympy_expr = parse_expr(expression_str)
+    print("Convert the string back to sympy")
+    print(sympy_expr)
 
+    # Generate tokens from the string representation
+    tokens = list(generate_tokens(io.StringIO(expression_str).readline))
 
+    # Print the generated tokens
+    print("Generated Tokens:")
+    for token in tokens:
+        print(token.string, end=" ")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # Convert the tokens back into a string
+    # untokenized_expression = untokenize(tokens)
+    #
+    # # Print the untokenized expression
+    # print("\nUntokenized Expression:")
+    # print(untokenized_expression)
+    # #print(u.args)
 
     """
     #x = dict()
@@ -584,7 +530,7 @@ def main():
     print(type(sy.sympify(1)))
     #print(check_children(expr,expr.func))
 
-    
+
 
     #assert len(str_deriv_list) == count_ops(expr, derivative)
 
@@ -609,7 +555,8 @@ def main():
     """
 
 
-main()
+if __name__ == '__main__':
+    main()
 
 
 
