@@ -9,6 +9,9 @@ import numpy as np
 import math
 from symbolicregression.envs.node_utils import Node, NodeList
 from .utils import *
+from sympy.parsing.sympy_parser import untokenize, generate_tokens, parse_expr
+import io
+import sympy as sy
 
 
 class Encoder(ABC):
@@ -159,48 +162,96 @@ class Equation(Encoder):
             except ValueError:
                 res.append(elem)
         return res
+    
+    def sympy_encoder(self,expr):
+        formatted_expr = format_float_coefficients(expr)
+        expression_str = str(formatted_expr)
+        tokens = list(generate_tokens(io.StringIO(expression_str).readline))
+
+        #all this is putting the PROSE float encoder into it.
+        res = []
+        for token in tokens:
+            try:            
+                token_str = token.string
+                val = float(token_str)
+                if token_str.lstrip("-").isdigit():
+                    #res.extend(write_int(int(token_str)))
+                    res.extend(token_str)
+                else:
+                    res.extend(self.float_encoder.encode(np.array([val])))
+            except ValueError:
+                res.append(token_str)
+        res.append(token.string)
+
+        return res
 
     def _decode(self, lst):
         """
         Decode list of symbols in prefix notation into a tree
         """
-        #The idea for now is to instead turn res into a final Sympy expression by modifying lst until it is one expression?
-
         if len(lst) == 0:
             return None, 0
         elif "OOD" in lst[0]:
             return None, 0
         elif lst[0] in self.all_operators.keys():
-            res = [lst[0]]
+            res = Node(lst[0], self.params)
             arity = self.all_operators[lst[0]]
             pos = 1
             for i in range(arity):
                 child, length = self._decode(lst[pos:])
                 if child is None:
                     return None, pos
-                res.append(child)
+                res.push_child(child)
                 pos += length
             return res, pos
         elif lst[0].startswith("INT"):
             val, length = self.parse_int(lst)
-            return str(val), length
+            return Node(str(val), self.params), length
         elif lst[0] == "+" or lst[0] == "-":
             try:
                 val = self.float_encoder.decode(lst[:3])[0]
             except Exception as e:
                 # print(e, "error in encoding, lst: {}".format(lst))
                 return None, 0
-            return str(val), 3
+            return Node(str(val), self.params), 3
         elif lst[0].startswith("CONSTANT") or lst[0] == "y":  ##added this manually CAREFUL!!
-            return lst[0], 1
+            return Node(lst[0], self.params), 1
         elif lst[0] in self.symbols:
-            return lst[0], 1
+            return Node(lst[0], self.params), 1
         else:
             try:
                 float(lst[0])  # if number, return leaf
-                return lst[0], 1
+                return Node(lst[0], self.params), 1
             except:
                 return None, 0
+    
+    def sympy_decode(self,lst):
+        """
+        Decode a list of symbols in prefix notation into a Sympy expression.
+        """
+        equations = []
+        if len(lst) == 0:
+            return None, 0
+        elif "OOD" in lst[0]:
+            return None, 0
+        else:
+            str_sympy = ""
+            for tok in lst:
+                if tok.startswith("N"):
+                    try:
+                        float(tok.lstrip("N"))
+                        tok = tok.lstrip("N")               # if the float_encoder adds the N.
+                    except:
+                        pass
+                elif tok == "|":
+                    untokenized_expr = sy.sympify(str_sympy)
+                    equations.append(untokenized_expr)
+                    str_sympy = ""
+                    tok = ""
+                str_sympy = str_sympy + tok
+            untokenized_expr = sy.sympify(str_sympy)
+            equations.append(untokenized_expr)
+            return equations, 0
 
     def split_at_value(self, lst, value):
         indices = [i for i, x in enumerate(lst) if x == value]
@@ -263,3 +314,22 @@ class Equation(Encoder):
                 break
         res.append("INT-" if neg else "INT+")
         return res[::-1]
+
+def format_float_coefficients(expr):
+    # Extract the terms and their coefficients
+    terms = expr.as_ordered_terms()
+    coefficients = [term.as_coeff_Mul()[0] for term in terms]
+
+    # Format the coefficients: only convert floats to scientific notation
+    formatted_coefficients = [
+        '{:.2e}'.format(coef.evalf()) if coef.is_Float else str(coef)
+        for coef in coefficients
+    ]
+
+    # Reconstruct the expression with formatted coefficients
+    formatted_expr = ' + '.join(
+        f'{formatted_coef}*{term.as_coeff_Mul()[1]}' if term.as_coeff_Mul()[1] != 1 else formatted_coef
+        for formatted_coef, term in zip(formatted_coefficients, terms)
+    )
+
+    return formatted_expr

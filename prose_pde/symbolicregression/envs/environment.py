@@ -274,7 +274,10 @@ class FunctionEnvironment(object):
             else:
                 return np.array(m)
         else:
-            m = self.equation_encoder.decode(words)
+            if self.params.use_sympy:
+                m = self.equation_encoder.sympy_decode(words)
+            else:
+                m = self.equation_encoder.decode(words)
             if m is None:
                 return None
             if str_array:
@@ -312,10 +315,16 @@ class FunctionEnvironment(object):
             return item, ["data generation error"]
 
         if "tree_encoded" not in item:
-            tree_encoded = self.equation_encoder.encode(tree)
-            assert all([x in self.equation_word2id for x in tree_encoded]), "tree: {}\n encoded: {}".format(
-                tree, tree_encoded
-            )
+            if self.params.use_sympy:
+                tree_encoded = self.equation_encoder.sympy_encoder(tree)
+                assert all([x in self.equation_word2id for x in tree_encoded]), "tree: {}\n encoded: {}".format(
+                    tree, tree_encoded
+                )
+            else:
+                tree_encoded = self.equation_encoder.encode(tree)
+                assert all([x in self.equation_word2id for x in tree_encoded]), "tree: {}\n encoded: {}".format(
+                    tree, tree_encoded
+                )
 
             item["tree_encoded"] = tree_encoded
 
