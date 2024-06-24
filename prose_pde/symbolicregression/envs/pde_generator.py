@@ -1634,7 +1634,6 @@ class PDEGenerator(ODEGenerator):
 
         p = self.params
 
-        #op_list = [["sub"]]
         if p.extrapolate_pdetypes:
             beta = 1
         else:
@@ -1651,6 +1650,7 @@ class PDEGenerator(ODEGenerator):
             wave_expr = coeff_t**2 * sy.diff(u,(t,2)) + beta**2 * sy.diff(u,(x,2))
             item["tree"] = wave_expr
         else:
+            op_list = [["sub"]]
             term_list = [
                 [
                     self.mul_terms([str(coeff_t ** 2), "utt_0"]),
