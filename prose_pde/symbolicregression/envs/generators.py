@@ -32,6 +32,7 @@ operators_real = {
     "pow": 2,
     "pow2": 1,
     "pow3": 1,
+    "Derivative": 2
 }
 
 operators_extra = dict()
@@ -99,6 +100,7 @@ class RandomFunctions(Generator):
             # + ["u_i+1"]
             # + ["u_i-1"]
             + ["x"]
+            + ["t"]
             # + ["u_n"]
             # + ["u_n-1"]
         )
@@ -107,6 +109,7 @@ class RandomFunctions(Generator):
             + self.constants
             + self.variables
             + ["|", "INT+", "INT-", "FLOAT+", "FLOAT-", "pow", "0"]
+            + ["(", ")", "+", "-", ","]
         )
         self.constants.remove("CONSTANT")
 
