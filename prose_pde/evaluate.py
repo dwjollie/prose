@@ -12,6 +12,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from scipy.integrate import solve_ivp
 from tabulate import tabulate
+import sympy as sy
 
 from tqdm import tqdm
 import h5py
@@ -574,11 +575,31 @@ class Evaluator(object):
                     valid_loss = []
 
                     for tree in tree_list:
-                        try:
-                            generated_outputs = tree.val(input_points, self.space_dim)
+                        if self.params.use_sympy:
+                            try:
+                                t_grid = np.linspace(0.0, self.params.t_range, self.params.t_num)
+                                x_grid = np.linspace(0.0, self.params.x_range, self.params.x_num)
+                                coeff = np.random.uniform(-5, 5, size=(8, self.params.max_input_dimension))
+                                # Create mesh grids
+                                T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
 
-                        except:
-                            continue
+                                x, t = sy.symbols('x t')
+                                u = sy.Function('u_0')(x,t)
+                                tens_poly = (coeff[0, i] + coeff[1, i] * T + coeff[2, i] * T**2) * (
+                                        coeff[3, i] + coeff[4, i] * X + coeff[5, i] * X**2 + coeff[6, i] * X**3 + coeff[7, i] * X**4
+                                    )
+                                
+                                expr = tree.subs(u,tens_poly)
+                                eval_expr = sy.lambdify([x,t],expr.doit(),"numpy")
+                                generated_outputs = eval_expr(X,T)
+                            except:
+                                continue
+                        else:
+                            try:
+                                generated_outputs = tree.val(input_points, self.space_dim)
+
+                            except:
+                                continue
 
                         if label_outputs is None:
                             # if self.space_dim == 0:

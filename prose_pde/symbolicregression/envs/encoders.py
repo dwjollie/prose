@@ -163,14 +163,18 @@ class Equation(Encoder):
                 res.append(elem)
         return res
     
-    def sympy_encoder(self,expr):
+    def sympy_encoder(self,str_expr):
+        expr = sy.sympify(str_expr) 
         formatted_expr = format_float_coefficients(expr)
         expression_str = str(formatted_expr)
         tokens = list(generate_tokens(io.StringIO(expression_str).readline))
 
         #all this is putting the PROSE float encoder into it.
         res = []
+        i=0
         for token in tokens:
+            if token == 0:
+                continue
             try:            
                 token_str = token.string
                 val = float(token_str)
@@ -180,8 +184,74 @@ class Equation(Encoder):
                 else:
                     res.extend(self.float_encoder.encode(np.array([val])))
             except ValueError:
+                if token_str == '-':
+                    try:
+                        token_str_float = float(tokens[i + 1].string)
+                        token_str = token_str + str(token_str_float)
+                        res.extend(self.float_encoder.encode(np.array([float(token_str)])))
+                        tokens[i + 1] = 0
+                        i = i + 2
+                        continue
+                    except ValueError:
+                        pass
+                elif token_str.startswith('u'):
+                    for j in range(5):
+                        token_str = token_str + tokens[i + j + 1].string
+                        tokens[i + j + 1] = 0
+                    res.append(token_str)
+                    i = i + 6
+                    continue
+                elif token_str == '':
+                    i = i + 1
+                    continue
                 res.append(token_str)
-        res.append(token.string)
+            i += 1
+
+        return res
+    
+    def sympy_encoder_with_placeholder(self,str_expr):
+        expr = sy.sympify(str_expr) 
+        formatted_expr = format_float_coefficients(expr)
+        expression_str = str(formatted_expr)
+        tokens = list(generate_tokens(io.StringIO(expression_str).readline))
+
+        #all this is putting the PROSE float encoder into it.
+        res = []
+        i=0
+        for token in tokens:
+            if token == 0:
+                continue
+            try:            
+                token_str = token.string
+                val = float(token_str)
+                if token_str.lstrip("-").isdigit():
+                    #res.extend(write_int(int(token_str)))
+                    res.extend(token_str)
+                else:
+                    res.append("<PLACEHOLDER>")
+            except ValueError:
+                if token_str == '-':
+                    try:
+                        token_str_float = float(tokens[i + 1].string)
+                        token_str = token_str + str(token_str_float)
+                        res.append('<PLACEHOLDER>')
+                        tokens[i + 1] = 0
+                        i = i + 2
+                        continue
+                    except ValueError:
+                        pass
+                elif token_str.startswith('u'):
+                    for j in range(5):
+                        token_str = token_str + tokens[i + j + 1].string
+                        tokens[i + j + 1] = 0
+                    res.append(token_str)
+                    i = i + 6
+                    continue
+                elif token_str == '':
+                    i = i + 1
+                    continue
+                res.append(token_str)
+            i += 1
 
         return res
 

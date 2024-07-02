@@ -4,6 +4,7 @@ from numpy.polynomial import polynomial as P
 from logging import getLogger
 from scipy.integrate import solve_ivp
 import sympy as sy
+import random
 
 logger = getLogger()
 
@@ -237,12 +238,49 @@ class ODEGenerator:
         """
         p = self.params
         tree = None
+
+        # Used in testing whether order is important. 
+        #random.shuffle(lst)
+        # Comment when not using.
+
         for i in reversed(range(len(lst))):
             if tree is None:
                 tree = Node(lst[i], p)
             else:
                 tree = Node("mul", p, [Node(lst[i], p), tree])
         return tree
+    
+    def randomize_tree(self, term_list, op_list):
+        """
+        randomizing the PROSE tree for testing. multiplication is done in code. Uncomment when using.
+        """
+        p = self.params
+        op_list = op_list[0]
+        term_list = term_list[0]
+
+        for i in range(len(op_list)):
+            if op_list[i] == "add":
+                choice = random.randint(0,1)
+                if choice == 1:
+                    term1 = term_list[i]
+                    term2 = term_list[i+1]
+                    term_list[i] = term2
+                    term_list[i+1] = term1
+            elif op_list[i] == "sub":
+                choice = random.randint(0,1)
+                if choice == 1:
+                    term_lst_tup = tuple(term_list)
+                    term1 = term_lst_tup[i]
+                    term2 = term_lst_tup[i+1]
+                    child_lst = []
+                    for child in term2.children:
+                        child_lst.append(str(child))
+                    child_lst.append(str(-1))
+                    new_term2 = self.mul_terms(child_lst)
+                    term_list[i] = new_term2
+                    term_list[i+1] = term1
+                    op_list[i] = "add" 
+        return [term_list], [op_list]
 
     def add_terms(self, lst):
         """

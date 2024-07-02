@@ -7,6 +7,7 @@ from scipy.integrate import solve_ivp
 from jax import numpy as jnp
 from sympy.parsing.sympy_parser import untokenize, generate_tokens, parse_expr
 import io
+import random
 
 logger = getLogger()
 
@@ -473,7 +474,30 @@ def sympy_encoder(self,expr):
 
     return res
 
-def main():
+def randomize_tree(self, term_list, op_list):
+    """
+    randomizing the PROSE tree for testing. multiplication is done in code.
+    """
+    op_list = op_list[0]
+    for i in len(op_list):
+        if op_list[i] == "add":
+            choice = random.randint(0,1)
+            if choice == 1:
+                term1 = term_list[i]
+                term2 = term_list[i+1]
+                term_list[i] = term2
+                term_list[i+1] = term1
+        elif op_list[i] == "sub":
+            choice = random.randint(0,1)
+            if choice == 1:
+                term1 = term_list[i]
+                term2 = term_list[i+1]
+                term_list[i] = self.mul_terms([-1,term2])
+                term_list[i+1] = term1
+                op_list[i] = "add" 
+    return term_list, op_list
+
+def testing():
     c = 0.02
 
     x, t = sy.symbols('x t')
@@ -499,7 +523,10 @@ def main():
     print("Generated Tokens:")
     #all this is is putting the PROSE float encoder into it.
     res = []
+    i = 0
     for token in tokens:
+        if token == 0:
+            continue
         try:            
             token_str = token.string
             val = float(token_str)
@@ -507,13 +534,35 @@ def main():
                 #res.extend(write_int(int(token_str)))
                 res.extend(token_str)
             else:
-                res.extend(encode(np.array([val])))
+                res.append("<PLACEHOLDER>")
         except ValueError:
+            if token_str == '-':
+                try:
+                    token_str_float = float(tokens[i + 1].string)
+                    token_str = token_str + str(token_str_float)
+                    res.append("<PLACEHOLDER>")
+                    tokens[i + 1] = 0
+                    i = i + 2
+                    continue
+                except ValueError:
+                    pass
+            elif token_str.startswith('u'):
+                for j in range(5):
+                    token_str = token_str + tokens[i + j + 1].string
+                    tokens[i + j + 1] = 0
+                res.append(token_str)
+                i = i + 6
+                continue
+            elif token_str == '':
+                i = i + 1
+                continue
             res.append(token_str)
-    res.append(token.string)
+        i += 1
     
+    return res
+def main():
+    res = testing()
     print(res)
-    
     #----------------------------------------------------------------------
     #If the transformer outputs it in list of strings form, this is a way to decode it.
     str_sympy = ""
@@ -523,14 +572,33 @@ def main():
     untokenized_expr = sy.sympify(str_sympy)
     print(untokenized_expr)
     #----------------------------------------------------------------------
+    sin_gord = untokenized_expr
+
+    t_grid = np.linspace(0.0, 2, 20)
+    x_grid = np.linspace(0.0, 2, 20)
+
+    x,t = sy.symbols('x t')
+    u = sy.Function('u_0')(x,t)
+
+    tens_poly = (1 + t + t**2)*(1 + x + x**2 + x**3 + x**4)
+    
+    T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
+
+    sin_gord = sin_gord.subs(u, tens_poly)
+    print(sin_gord.doit())
+    f = sy.lambdify([x,t],sin_gord.doit(),"numpy")
+    val = f(X,T)
+    print(val)
 
     # Convert the tokens back into a string
-    untokenized_expression = untokenize(tokens)
+    #untokenized_expression = untokenize(tokens)
     #
     # # Print the untokenized expression
-    print("\nUntokenized Expression:")
-    print(untokenized_expression)
+    #print("\nUntokenized Expression:")
+    #print(untokenized_expression)
     # #print(u.args)
+
+
 
 if __name__ == '__main__':
     main()

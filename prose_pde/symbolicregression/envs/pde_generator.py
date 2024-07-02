@@ -475,7 +475,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             heat_expr = coeff_t * sy.diff(u,t) - c1 * sy.diff(u,(x,2))  #This also allows us to use this in generation with sy.lamdify
-            item["tree"] = heat_expr
+            item["tree"] = str(heat_expr)
         else:
             op_list = [["sub"]]
             term_list = [
@@ -484,6 +484,10 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(c1), "uxx_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
+
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         #
@@ -613,8 +617,8 @@ class PDEGenerator(ODEGenerator):
             x,t = sy.symbols('x t')
             u = sy.Function('u_0')(x,t)
 
-            por_med_expr = coeff * sy.diff(u,t) - sy.diff(u**m,(x,2))
-            item["tree"] = por_med_expr
+            porous_medium_expr = coeff * sy.diff(u,t) - sy.diff(u**m,(x,2))
+            item["tree"] = str(porous_medium_expr)
         else:
             op_list = [["add", "add"]]
             term_list = [
@@ -642,6 +646,9 @@ class PDEGenerator(ODEGenerator):
                     ),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         #
@@ -763,8 +770,8 @@ class PDEGenerator(ODEGenerator):
             x,t = sy.symbols('x t')
             u = sy.Function('u_0')(x,t)
 
-            klein_gord_expr = coeff**2 * sy.diff(u,(t,2)) - c**2 * sy.diff(u,(x,2)) + (m**2 * c**4) * u
-            item["tree"] = klein_gord_expr
+            klein_gordon_expr = coeff**2 * sy.diff(u,(t,2)) - c**2 * sy.diff(u,(x,2)) + (m**2 * c**4) * u
+            item["tree"] = str(klein_gordon_expr)
         else:
             op_list = [["sub", "add"]]
             term_list = [
@@ -774,6 +781,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(m**2 * c**4), "u_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         dt_this = self.dt / (100 * coeff)
@@ -908,7 +918,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             sine_gord_expr = coeff**2 * sy.diff(u,(t,2)) - sy.diff(u,(x,2)) + c * sy.sin(u)
-            item["tree"] = sine_gord_expr
+            item["tree"] = str(sine_gord_expr)
         else:
             op_list = [["sub", "add"]]
             term_list = [
@@ -918,6 +928,9 @@ class PDEGenerator(ODEGenerator):
                     Node("mul", p, [Node(str(c), p), Node("sin", p, [Node("u_0", p)])]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         dt_this = self.dt / (coeff * 100)
@@ -1047,7 +1060,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             cahnhillard_1D_expr = sy.diff(u,(t,2)) + eps **2 * sy.diff(u,(x,4)) + 6 * sy.diff((u * sy.diff(u,x)),x)
-            item["tree"] = cahnhillard_1D_expr
+            item["tree"] = str(cahnhillard_1D_expr)
         else:
             op_list = [["add", "add", "add"]]
             term_list = [
@@ -1058,6 +1071,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(6), "u_0", "uxx_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         #
@@ -1184,7 +1200,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             kdv_expr = coeff * sy.diff(u,t) + delta2 * sy.diff(u,x,x,x) + u * sy.diff(u,x)
-            item["tree"] = kdv_expr
+            item["tree"] = str(kdv_expr)
         else:
             op_list = [["add", "add"]]
             term_list = [
@@ -1194,6 +1210,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms(["u_0", "ux_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         # Assuming nx is even for simplicity
@@ -1498,7 +1517,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             adv_expr = coeff * sy.diff(u,t) + beta * sy.diff(u,x)
-            item["tree"] = adv_expr
+            item["tree"] = str(adv_expr)
         else:
             op_list = [["add"]]
             term_list = [
@@ -1507,6 +1526,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(beta), "ux_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -1648,7 +1670,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             wave_expr = coeff_t**2 * sy.diff(u,(t,2)) + beta**2 * sy.diff(u,(x,2))
-            item["tree"] = wave_expr
+            item["tree"] = str(wave_expr)
         else:
             op_list = [["sub"]]
             term_list = [
@@ -1657,6 +1679,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(beta ** 2), "uxx_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
         beta_range = self.get_sample_range(beta)
         beta = self.refine_floats(rng.uniform(*beta_range, (1,)))[0]
@@ -1792,7 +1817,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             diff_logisreact_1D_expr = coeff_t * sy.diff(u,t) - nu * sy.diff(u,(x,2)) - rho * (u * (1-u))
-            item["tree"] = diff_logisreact_1D_expr
+            item["tree"] = str(diff_logisreact_1D_expr)
         else:
             op_list = [["sub", "sub"]]
             term_list = [
@@ -1811,7 +1836,9 @@ class PDEGenerator(ODEGenerator):
                     # self.mul_terms([str(rho), "u_0", "u_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -1916,7 +1943,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             diff_linearreact_1D_expr = coeff_t * sy.diff(u,t) - nu * sy.diff(u,(x,2)) - rho * u
-            item["tree"] = diff_linearreact_1D_expr
+            item["tree"] = str(diff_linearreact_1D_expr)
         else:
             op_list = [["sub", "sub"]]
             term_list = [
@@ -1926,7 +1953,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(rho), "u_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2048,7 +2077,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             diff_bistablereact_1D_expr = coeff * sy.diff(u,t) - nu * sy.diff(u,(x,2)) - rho * (u * (1 - u) * (u - a))
-            item["tree"] = diff_bistablereact_1D_expr
+            item["tree"] = str(diff_bistablereact_1D_expr)
         else:
             op_list = [["sub", "sub"]]
             term_list = [
@@ -2072,7 +2101,9 @@ class PDEGenerator(ODEGenerator):
                     ),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2188,7 +2219,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             diff_squarelogisreact_1D_expr = coeff * sy.diff(u,t) - nu * sy.diff(u,(x,2)) - rho * ((u ** 2) * (1 - u) ** 2)
-            item["tree"] = diff_squarelogisreact_1D_expr
+            item["tree"] = str(diff_squarelogisreact_1D_expr)
         else:
             op_list = [["sub", "sub"]]
             term_list = [
@@ -2212,7 +2243,9 @@ class PDEGenerator(ODEGenerator):
                     ),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2307,7 +2340,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             burgers_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/2)*u**2),x) - (eps/np.pi) * sy.diff(u,(x,2))
-            item["tree"] = burgers_expr
+            item["tree"] = str(burgers_expr)
         else:
 
             op_list = [["add", "sub"]]
@@ -2318,7 +2351,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2485,7 +2520,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x,t)
 
             inv_burgers_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/2)*u**2),x)
-            item["tree"] = inv_burgers_expr
+            item["tree"] = str(inv_burgers_expr)
         else:
             op_list = [["add"]]
             term_list = [
@@ -2494,7 +2529,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(k), "u_0", "ux_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2676,7 +2713,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             cons_linearflux_expr = coeff * sy.diff(u,t) + k * sy.diff(u,x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = cons_linearflux_expr
+            item["tree"] = str(cons_linearflux_expr)
         else:
             op_list = [["add", "sub"]]
             term_list = [
@@ -2686,7 +2723,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -2914,7 +2953,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             cons_cubicflux_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/3)*(u**3)),x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = cons_cubicflux_expr
+            item["tree"] = str(cons_cubicflux_expr)
         else:
             op_list = [["add", "sub"]]
             term_list = [
@@ -2924,7 +2963,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -3110,7 +3151,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             inv_cubicflux_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/3)*(u**3)),x) 
-            item["tree"] = inv_cubicflux_expr
+            item["tree"] = str(inv_cubicflux_expr)
         else:
             op_list = [["add"]]
             term_list = [
@@ -3119,7 +3160,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(k), "u_0", "u_0", "ux_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -3314,7 +3357,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             cons_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(x)),x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = cons_sinflux_expr
+            item["tree"] = str(cons_sinflux_expr)
         else:
             op_list = [["add", "sub"]]
             term_list = [
@@ -3324,7 +3367,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -3507,7 +3552,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             inv_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(x)),x) 
-            item["tree"] = inv_sinflux_expr
+            item["tree"] = str(inv_sinflux_expr)
         else:
             op_list = [["add"]]
             term_list = [
@@ -3516,7 +3561,9 @@ class PDEGenerator(ODEGenerator):
                     Node("mul", p, [Node(str(k), p), Node("mul", p, [Node("cos", p, [Node("u_0", p)]), Node("ux_0", p)])]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -3717,7 +3764,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             cons_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(x)),x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = cons_cosflux_expr
+            item["tree"] = str(cons_cosflux_expr)
         else:
 
             op_list = [["sub", "sub"]]
@@ -3728,7 +3775,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -3915,7 +3964,7 @@ class PDEGenerator(ODEGenerator):
             u = sy.Function('u_0')(x, t)
 
             inv_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(x)),x)
-            item["tree"] = inv_cosflux_expr
+            item["tree"] = str(inv_cosflux_expr)
         else:
             op_list = [["sub"]]
             term_list = [
@@ -3924,7 +3973,9 @@ class PDEGenerator(ODEGenerator):
                     Node("mul", p, [Node(str(k), p), Node("mul", p, [Node("sin", p, [Node("u_0", p)]), Node("ux_0", p)])]),
                 ]
             ]
-
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
@@ -4141,7 +4192,7 @@ class PDEGenerator(ODEGenerator):
             U = c * sy.cos()
 
             fplanck_expr = coeff_t * sy.diff(u,t) - (scipy.constants.k * temperature / (drag* um**2)) * sy.diff(u(x,2)) + (1/(drag * um**2)) * sy.diff((sy.diff(c * sy.cos((x * um)/L)),x) * u)
-            item["tree"] = fplanck_expr
+            item["tree"] = str(fplanck_expr)
         else:
             op_list = [["add", "sub", "sub"]]
             term_list = [
@@ -4174,6 +4225,9 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(scipy.constants.k * temperature / (drag * um**2)), "uxx_0"]),
                 ]
             ]
+            # Used in testing whether permutation is important.
+            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
         # Define the potential function U(x) using micrometers
