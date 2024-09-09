@@ -275,7 +275,10 @@ class FunctionEnvironment(object):
                 return np.array(m)
         else:
             if self.params.use_sympy:
-                m = self.equation_encoder.sympy_decode(words)
+                try:
+                    m = self.equation_encoder.sympy_decode(words)
+                except:
+                    m = "EMPTY"
             else:
                 m = self.equation_encoder.decode(words)
             if m is None:
@@ -703,13 +706,16 @@ class EnvDataset(Dataset):
             )
 
             self.tree_skeletons = []
-
             for i in range(self.size):
                 mode = self.modes[i]
+                tree = None
                 if str(self.params.types).startswith("pde"):
-                    tree_skeleton = self.env.generator.pde_generator.get_skeleton_tree(
-                        self.data[i]["type"], mode=mode, rng=self.env.rng
-                    )
+                    if self.params.use_sympy:
+                        tree_skeleton = self.env.generator.pde_generator.get_sympy_skeleton_tree(self.data[i]["type"], tree, mode = mode, rng = self.env.rng)
+                    else:
+                        tree_skeleton = self.env.generator.pde_generator.get_skeleton_tree(
+                            self.data[i]["type"], mode=mode, rng=self.env.rng
+                        )
                 else:
                     tree_skeleton = self.env.generator.ode_generator.get_skeleton_tree(
                         self.data[i]["type"], mode=mode, rng=self.env.rng
@@ -873,7 +879,10 @@ class EnvDataset(Dataset):
                     )
                     if str(self.params.types).startswith("pde"):
                         if self.params.use_sympy:
-                            x["tree_skeleton"] = self.env.equation_encoder.sympy_encoder_with_placeholder(x["tree"]) # does not have rng.
+                            x["tree"] = str((self.env.equation_encoder.sympy_decode(x["tree_encoded"]))[0])
+                            x["tree_skeleton"] = self.env.generator.pde_generator.get_sympy_skeleton_tree(
+                                x["type"], x["tree"], mode = mode, rng = self.env.rng
+                                )
                         else:
                             x["tree_skeleton"] = self.env.generator.pde_generator.get_skeleton_tree(
                                 x["type"], mode=mode, rng=self.env.rng
@@ -890,7 +899,9 @@ class EnvDataset(Dataset):
             else:
                 if str(self.params.types).startswith("pde"):
                     if self.params.use_sympy:
-                        x["tree_skeleton"] = self.env.equation_encoder.sympy_encoder_with_placeholder(x["tree"])
+                        x["tree"] = self.env.equation_encoder.sympy_decode(x["tree_encoded"])
+                        x["tree_skeleton"] = self.env.equation_encoder.sympy_encoder_with_placeholder(str(x["tree"][0]))
+                        x["tree"] = str(x["tree"])
                     else:
                         x["tree_skeleton"] = self.env.generator.pde_generator.get_skeleton_tree(
                             x["type"], mode=0, rng=self.env.rng

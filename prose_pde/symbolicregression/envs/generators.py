@@ -109,7 +109,7 @@ class RandomFunctions(Generator):
             + self.constants
             + self.variables
             + ["|", "INT+", "INT-", "FLOAT+", "FLOAT-", "pow", "0"]
-            + ["(", ")", "+", "-", ",", "*", "Derivative"]
+            + ["(", ")", "+", "-", ",", "*", "**", "Derivative"]
         )
         self.constants.remove("CONSTANT")
 

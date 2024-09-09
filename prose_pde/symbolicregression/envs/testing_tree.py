@@ -1,6 +1,7 @@
 import sympy.functions
 import torch
 import numpy as np
+# from filterpy.kalman import KalmanFilter        #need to download this...
 import scipy.special
 from logging import getLogger
 from scipy.integrate import solve_ivp
@@ -502,8 +503,9 @@ def testing():
 
     x, t = sy.symbols('x t')
     u = sy.Function('u_0')(x, t)
+    delta2 = 0.044
 
-    sin_gord = sy.diff(u, (t, 2)) - c ** 2 * sy.diff(u, (x, 2)) + c * sy.sin(u)
+    sin_gord = sy.diff(u,t) + delta2 * sy.diff(u,x,x,x) + u * sy.diff(u,x)
     print("Origin sympy information")
     print(sin_gord)
     # Reconstruct the expression with formatted coefficients
@@ -546,57 +548,257 @@ def testing():
                     continue
                 except ValueError:
                     pass
-            elif token_str.startswith('u'):
-                for j in range(5):
-                    token_str = token_str + tokens[i + j + 1].string
-                    tokens[i + j + 1] = 0
-                res.append(token_str)
-                i = i + 6
-                continue
-            elif token_str == '':
-                i = i + 1
-                continue
+            # elif token_str.startswith('u'):
+            #     for j in range(5):
+            #         token_str = token_str + tokens[i + j + 1].string
+            #         tokens[i + j + 1] = 0
+            #     res.append(token_str)
+            #     i = i + 6
+            #     continue
+            # elif token_str == '':
+            #     i = i + 1
+            #     continue
             res.append(token_str)
         i += 1
     
     return res
+
+def initialize_k_filter(process_noise, obs_noise,N):
+    f = KalmanFilter(dim_x=128, dim_z=128)
+    ide = np.identity(N)
+    f.F = ide                       # alpha_t+1 = [1]*alpha_t + noise
+
+    FD_matrix = np.zeros((N,N))     # initialize.  Should be [FD(with alpha) Addition of u_t-1, zeros for rest]
+
+    f.P *= process_noise            # uncertainty in process
+
+    unc_r = np.identity(N)
+    unc_r[0,0] = 1/obs_noise
+    unc_r[1,1] = 1/obs_noise
+    f.R = unc_r                     # uncertainty
+
+
+    noise_mat = np.zeros((N,N))
+    noise_mat[:,1] = process_noise
+    f.Q = noise_mat                # assumed noise of updating. This has a long and tedious derivation, and I don't fully understand how to do it.
+    return f, FD_matrix
+
+def refinement_kalman(self,type,expr,data_input):
+    p = self.params
+    # Time steps
+    T = p.t_num
+
+    # Grid points for the heat equation
+    N = p.x_num
+
+    # Number of iterations
+    max_it = 5
+
+#     if type == "heat":
+
+#         true_alpha = 0.1
+
+#         # Observation noise
+#         obs_noise = 0.0005
+
+#         # Process noise
+#         process_noise = 0.000015
+
+#         # Initialize alpha
+#         alpha = true_alpha + obs_noise
+
+#         f, FD_matrix = initialize_k_filter(process_noise, obs_noise, N)
+#         observations = data_input[0,:,:,0]
+
+#         # Initial state of alpha
+#         alpha_vec = np.zeros((N,1))
+#         alpha_vec[0] = alpha
+#         alpha_vec[1] = 1                # [alpha, 1, 0,...,0]
+#         f.x = alpha_vec       
+
+
+
+#         for i in range(1,max_it):
+#             FD_matrix[:,0] = observations[i+1,:] - 2. * observations[i,:] + observations[i-1,:]
+#             FD_matrix[:,1] = observations[i-1,:]
+#             f.H = FD_matrix
+            
+#             u_new = np.copy(observations)
+            
+#             u_new[:,i] = u[:,i] + true_alpha * (observations[:,i+1] - 2*observations[:,i] + observations[:,i-1])
+#             observations[:,i] = u_new[:,i]
+            
+#             f.predict()
+#             f.update(u[:,i])
+            
+#             value = float(f.x[0][0])
+#             const = float(f.x[1][0])
+
+
 def main():
-    res = testing()
-    print(res)
-    #----------------------------------------------------------------------
-    #If the transformer outputs it in list of strings form, this is a way to decode it.
-    str_sympy = ""
-    for tok in res:
-        tok = tok.lstrip("N") # if the encoder adds the N.
-        str_sympy = str_sympy + tok
-    untokenized_expr = sy.sympify(str_sympy)
-    print(untokenized_expr)
-    #----------------------------------------------------------------------
-    sin_gord = untokenized_expr
+    l = testing()
+    print(l)
+#     # Number of particles
+#     M = 100
 
-    t_grid = np.linspace(0.0, 2, 20)
-    x_grid = np.linspace(0.0, 2, 20)
+#     # Time steps
+#     T = 8
 
-    x,t = sy.symbols('x t')
-    u = sy.Function('u_0')(x,t)
+#     # Grid points for the heat equation
+#     N = 128
 
-    tens_poly = (1 + t + t**2)*(1 + x + x**2 + x**3 + x**4)
+#     # Initial temperature distribution (u)
+#     u = np.zeros((T, N))
+#     # u[0, 10:100] = np.random.uniform(0,.0001, 90)  # Initial condition
+
+#     # the m.
+#     true_alpha = 2 #3, 4
+
+#     coeff = T / 2
+
+#     # Observation noise
+#     obs_noise = 0.0005
+
+#     # Process noise
+#     process_noise = 0.00001
+
+#     # Define the initial distribution of particles for alpha (uniform distribution)
+#     def initial_distribution():
+#         return np.random.uniform(0.9*true_alpha, 1.10 * true_alpha, M)
+
+#     # Propagate particles with noise
+#     def propagate_particles(particles):
+#         noise = np.random.normal(0, process_noise, M)
+#         return np.abs(particles + noise)
+
+#     def f_closure(m):
+#         m = round(m,5)
+#         def f(t,u):
+#             d2um_dx2 = np.zeros_like(u)
+#             dx = 5 / 128
+#             um = np.power(u, m)
+#             # Compute second spatial derivatives using central differences
+#             for i in range(1, N - 1):
+#                 d2um_dx2[i] = (um[i - 1] - 2 * um[i] + um[i + 1]) / dx**2  
+            
+#             # Periodic boundary conditions
+#             d2um_dx2[0] = (um[-1] - 2 * um[0] + um[1]) / dx**2
+#             d2um_dx2[-1] = (um[-2] - 2 * um[-1] + um[0]) / dx**2
+
+#             du_dt = d2um_dx2
+#             return du_dt
+#         return f
+        
+        
+#     # Compute the next state of the heat equation using finite difference
+#     def pm_equation_step(u_prev, alpha,t):   
+#         dt = 2/T
+#         fun = f_closure(alpha)
+#         solution = np.zeros(np.size(u_prev))
+#         for l in range(np.size(u_prev, axis = 1)):    
+#             y_0 = u_prev[l]
+#             sol = solve_ivp(fun,
+#                         (t,t+dt),
+#                         y_0,
+#                         method = 'RK45',
+#                         t_eval = np.arange(t,t+dt,1))
+#             solution[l] = sol.y[0]
+        
+#         return sol.y[t]
+
+#     # Compute the weights based on the observation
+#     def compute_weights(particles, observation, u_prev,t):
+#         weights = np.zeros(M)
+#         for i in range(M):
+#             u_pred = pm_equation_step(u_prev, particles[i],t)
+#             weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+#         return weights / np.sum(weights)
+
+#     # Resample particles based on their weights using systematic resampling
+#     def resample(particles, weights):
+#         positions = (np.arange(M) + np.random.uniform(0, 1)) / M
+#         indexes = np.zeros(M, 'i')
+#         cumulative_sum = np.cumsum(weights)
+#         i, j = 0, 0
+#         while i < M:
+#             if positions[i] < cumulative_sum[j]:
+#                 indexes[i] = j
+#                 i += 1
+#             else:
+#                 j += 1
+#         return particles[indexes]
+
+#     # Initial distribution of particles
+#     particles = initial_distribution()
+
+#     # Simulate a sequence of observations
+#     observations = np.zeros((T, N))
+#     observations[0] = u[0] + np.random.normal(0, obs_noise, N)
+
+#     # Run the particle filter
+#     for t in range(1, T):
+#         # Propagate particles
+#         particles = propagate_particles(particles)
+        
+#         # Compute the next state for the true system
+#         u[t] = pm_equation_step(u[:t], true_alpha,t)
+
+#         # Generate noisy observations
+#         observations[t] = u[t] + np.random.normal(0, obs_noise, N)
+
+#         # Compute weights
+#         weights = compute_weights(particles, observations[t,:], observations[:t-1,:],t)
+
+#         # Resample particles
+#         particles = resample(particles, weights)
+
+#         # Estimate the state
+#         estimated_alpha = np.mean(particles)
+#         print(f"Time {t}, True Alpha {true_alpha:.4f}, Estimated Alpha {estimated_alpha:.4f}")
+#     # tree_expr = "([1.0*Derivative(u_0(x, t), t) - 0.00328*Derivative(u_0(x, t), (x, 2))], 0)"
+#     # original_expr = ""
+#     # amt_terms = len(tree_expr)
+#     # terms_to_remove = [0, 1, amt_terms, (amt_terms - 1), (amt_terms - 2), (amt_terms - 3), (amt_terms - 4), (amt_terms - 5)]
+#     # for k in range(len(tree_expr)):
+#     #     if not k in terms_to_remove:
+#     #         original_expr = original_expr + tree_expr[k]
+#     # print(original_expr, type(original_expr))
+#     # res = testing()
+#     # print(res)
+#     # #----------------------------------------------------------------------
+#     # #If the transformer outputs it in list of strings form, this is a way to decode it.
+#     # str_sympy = ""
+#     # for tok in res:
+#     #     tok = tok.lstrip("N") # if the encoder adds the N.
+#     #     str_sympy = str_sympy + tok
+#     # untokenized_expr = sy.sympify(str_sympy)
+#     # print(untokenized_expr)
+#     # #----------------------------------------------------------------------
+#     # sin_gord = untokenized_expr
+
+#     # t_grid = np.linspace(0.0, 2, 20)
+#     # x_grid = np.linspace(0.0, 2, 20)
+
+#     # x,t = sy.symbols('x t')
+#     # u = sy.Function('u_0')(x,t)
+
+#     # tens_poly = (1 + t + t**2)*(1 + x + x**2 + x**3 + x**4)
     
-    T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
+#     # T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
 
-    sin_gord = sin_gord.subs(u, tens_poly)
-    print(sin_gord.doit())
-    f = sy.lambdify([x,t],sin_gord.doit(),"numpy")
-    val = f(X,T)
-    print(val)
+#     # sin_gord = sin_gord.subs(u, tens_poly)
+#     # print(sin_gord.doit())
+#     # f = sy.lambdify([x,t],sin_gord.doit(),"numpy")
+#     # val = f(X,T)
+#     # print(val)
 
-    # Convert the tokens back into a string
-    #untokenized_expression = untokenize(tokens)
-    #
-    # # Print the untokenized expression
-    #print("\nUntokenized Expression:")
-    #print(untokenized_expression)
-    # #print(u.args)
+#     # Convert the tokens back into a string
+#     #untokenized_expression = untokenize(tokens)
+#     #
+#     # # Print the untokenized expression
+#     #print("\nUntokenized Expression:")
+#     #print(untokenized_expression)
+#     # #print(u.args)
 
 
 

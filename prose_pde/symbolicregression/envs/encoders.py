@@ -211,8 +211,7 @@ class Equation(Encoder):
     
     def sympy_encoder_with_placeholder(self,str_expr):
         expr = sy.sympify(str_expr) 
-        formatted_expr = format_float_coefficients(expr)
-        expression_str = str(formatted_expr)
+        expression_str = str(expr)
         tokens = list(generate_tokens(io.StringIO(expression_str).readline))
 
         #all this is putting the PROSE float encoder into it.
@@ -246,6 +245,10 @@ class Equation(Encoder):
                         tokens[i + j + 1] = 0
                     res.append(token_str)
                     i = i + 6
+                    continue
+                elif token_str.startswith("PLACE"):
+                    res.append("<PLACEHOLDER>")
+                    i = i + 1
                     continue
                 elif token_str == '':
                     i = i + 1
@@ -318,10 +321,13 @@ class Equation(Encoder):
                     equations.append(untokenized_expr)
                     str_sympy = ""
                     tok = ""
+                elif tok == "<EOS>":
+                    break
                 str_sympy = str_sympy + tok
+            # print(str_sympy)
             untokenized_expr = sy.sympify(str_sympy)
             equations.append(untokenized_expr)
-            return equations, 0
+            return equations
 
     def split_at_value(self, lst, value):
         indices = [i for i, x in enumerate(lst) if x == value]

@@ -311,44 +311,70 @@ class PDEGenerator(ODEGenerator):
         self.total_types = len(self.types)
         self.termlist = ["u", "ut", "ux", "uxx", "uxxx", "uxxxx"]
 
+        x,t = sy.symbols('x t')
+        u = sy.Function('u_0')(x,t)
+        self.sympy_termlist = [str(u), str(sy.diff(u,t)), str(sy.diff(u,x)), str(sy.diff(u,(x,2))), str(sy.diff(u,(x,3))), str(sy.diff(u,(x,4)))]
+
         if self.params.noisy_text_input:
             p = self.params
             self.missing_locations = dict()
             self.addition_locations = dict()
 
-            # generate terms to be added (polynomials of degree at most 2)
-            self.addition_terms = dict()
-            for dim in range(
-                self.params.min_output_dimension, self.params.max_output_dimension + 1
-            ):  # max_output_dimension = max_pde_mesh
-                cur_addition_terms = [Node(self.ph, p)]
+            if self.params.use_sympy:
 
-                for k in range(len(self.termlist)):
-                    for i in range(dim):
-                        cur_addition_terms.append(
-                            Node("mul", p, [Node(self.ph, p), Node(f"{self.termlist[k]}_{i}", p)])
-                        )
+                # generate terms to be added (polynomials of degree at most 2)
+                self.addition_terms = dict()
+                for dim in range(
+                    self.params.min_output_dimension, self.params.max_output_dimension + 1
+                ):  # max_output_dimension = max_pde_mesh
+                    
+                    cur_addition_terms = []
+                
+                    for k in range(len(self.termlist)):
+                        for i in range(dim):
+                            cur_addition_terms.append(
+                                "PLACEHOLDER" + " * " + f"{self.sympy_termlist[k]}"
+                            )
 
-                        for j in range(i, dim):
-                            for m in range(k, len(self.termlist)):
-                                cur_addition_terms.append(
-                                    Node(
-                                        "mul",
-                                        p,
-                                        [
-                                            Node(self.ph, p),
-                                            Node(
-                                                "mul",
-                                                p,
-                                                [
-                                                    Node(f"{self.termlist[k]}_{i}", p),
-                                                    Node(f"{self.termlist[m]}_{j}", p),
-                                                ],
-                                            ),
-                                        ],
+                            for j in range(i, dim):
+                                for m in range(k, len(self.termlist)):
+                                    cur_addition_terms.append(
+                                        "PLACEHOLDER" + " * " + f"{self.sympy_termlist[k]}" + " * " + f"{self.sympy_termlist[m]}"
                                     )
-                                )
-                self.addition_terms[dim] = cur_addition_terms
+                    self.addition_terms[dim] = cur_addition_terms
+            else:
+                self.addition_terms = dict()
+                for dim in range(
+                    self.params.min_output_dimension, self.params.max_output_dimension + 1
+                ):  # max_output_dimension = max_pde_mesh
+                    cur_addition_terms = [Node(self.ph, p)]
+
+                    for k in range(len(self.termlist)):
+                        for i in range(dim):
+                            cur_addition_terms.append(
+                                Node("mul", p, [Node(self.ph, p), Node(f"{self.termlist[k]}_{i}", p)])
+                            )
+
+                            for j in range(i, dim):
+                                for m in range(k, len(self.termlist)):
+                                    cur_addition_terms.append(
+                                        Node(
+                                            "mul",
+                                            p,
+                                            [
+                                                Node(self.ph, p),
+                                                Node(
+                                                    "mul",
+                                                    p,
+                                                    [
+                                                        Node(f"{self.termlist[k]}_{i}", p),
+                                                        Node(f"{self.termlist[m]}_{j}", p),
+                                                    ],
+                                                ),
+                                            ],
+                                        )
+                                    )
+                    self.addition_terms[dim] = cur_addition_terms
 
         self.shared_ICs = None
         self.shared_coeff = None
@@ -443,16 +469,24 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def heat_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            heat_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2))  #This also allows us to use this in generation with sy.lamdify
+            return  str(heat_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_heat(self, rng, train, ICs=None,coeff = None):
         item = {"type": "heat"}
@@ -576,32 +610,40 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def porous_medium_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "add"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                Node(
-                    "mul",
-                    p,
-                    [
-                        Node(ph, p),
-                        Node(
-                            "mul",
-                            p,
-                            [Node("pow", p, [Node("u_0", p), Node(ph, p)]), Node("pow2", p, [Node("ux_0", p)])],
-                        ),
-                    ],
-                ),
-                Node(
-                    "mul",
-                    p,
-                    [Node(ph, p), Node("mul", p, [Node("pow", p, [Node("u_0", p), Node(ph, p)]), Node("uxx_0", p)])],
-                ),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            porous_medium_expr = ph * sy.diff(u,t) + ph * u ** ph * sy.diff(u,x) ** 2 + ph * u ** ph * sy.diff(u,(x,2))
+            return str(porous_medium_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    Node(
+                        "mul",
+                        p,
+                        [
+                            Node(ph, p),
+                            Node(
+                                "mul",
+                                p,
+                                [Node("pow", p, [Node("u_0", p), Node(ph, p)]), Node("pow2", p, [Node("ux_0", p)])],
+                            ),
+                        ],
+                    ),
+                    Node(
+                        "mul",
+                        p,
+                        [Node(ph, p), Node("mul", p, [Node("pow", p, [Node("u_0", p), Node(ph, p)]), Node("uxx_0", p)])],
+                    ),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_porous_medium(self, rng, train, ICs=None,coeff = None):  # ignore ICs here
 
@@ -741,11 +783,19 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def Klein_Gordon_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "add"]]
-        term_list = [[self.mul_terms([ph, "utt_0"]), self.mul_terms([ph, "uxx_0"]), self.mul_terms([ph, "u_0"])]]
-        return op_list, term_list
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            klein_gordon_expr = ph * sy.diff(u,(t,2)) - ph * sy.diff(u,(x,2)) + ph * u
+            return str(klein_gordon_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "add"]]
+            term_list = [[self.mul_terms([ph, "utt_0"]), self.mul_terms([ph, "uxx_0"]), self.mul_terms([ph, "u_0"])]]
+            return op_list, term_list
 
     def generate_Klein_Gordon(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -782,7 +832,7 @@ class PDEGenerator(ODEGenerator):
                 ]
             ]
             # Used in testing whether permutation is important.
-            #term_list, op_list = self.randomize_tree(term_list, op_list)
+            # term_list, op_list = self.randomize_tree(term_list, op_list)
             # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
 
@@ -887,17 +937,25 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def Sine_Gordon_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "add"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "utt_0"]),
-                Node("uxx_0", p),
-                Node("mul", p, [Node(ph, p), Node("sin", p, [Node("u_0", p)])]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            sine_gord_expr = ph * sy.diff(u,(t,2)) - sy.diff(u,(x,2)) + ph * sy.sin(u)
+            return str(sine_gord_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "utt_0"]),
+                    Node("uxx_0", p),
+                    Node("mul", p, [Node(ph, p), Node("sin", p, [Node("u_0", p)])]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_Sine_Gordon(self, rng, train, ICs=None,coeff = None):
 
@@ -1031,18 +1089,26 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def cahnhilliard_1D_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "add", "add"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxxxx_0"]),
-                self.mul_terms([ph, "ux_0", "ux_0"]),
-                self.mul_terms([ph, "u_0", "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            cahnhillard_1D_expr = 4.0 * sy.diff(u,t) + 5.0 * sy.diff(u,(x,4)) + 6.0 * sy.diff((u * sy.diff(u,x)),x) #floats so that the encoder decodes to ph
+            return str(cahnhillard_1D_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "add", "add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxxxx_0"]),
+                    self.mul_terms([ph, "ux_0", "ux_0"]),
+                    self.mul_terms([ph, "u_0", "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_cahnhilliard_1D(self, rng, train, ICs=None,coeff = None):
         eps = 0.01
@@ -1059,7 +1125,7 @@ class PDEGenerator(ODEGenerator):
             x,t = sy.symbols('x t')
             u = sy.Function('u_0')(x,t)
 
-            cahnhillard_1D_expr = sy.diff(u,(t,2)) + eps **2 * sy.diff(u,(x,4)) + 6 * sy.diff((u * sy.diff(u,x)),x)
+            cahnhillard_1D_expr = coeff * sy.diff(u,t) + eps **2 * sy.diff(u,(x,4)) + 6 * sy.diff((u * sy.diff(u,x)),x)
             item["tree"] = str(cahnhillard_1D_expr)
         else:
             op_list = [["add", "add", "add"]]
@@ -1177,11 +1243,19 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def kdv_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "add"]]
-        term_list = [[self.mul_terms([ph, "ut_0"]), self.mul_terms([ph, "uxxx_0"]), self.mul_terms(["u_0", "ux_0"])]]
-        return op_list, term_list
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            kdv_expr = ph * sy.diff(u,t) + ph * sy.diff(u,x,x,x) + u * sy.diff(u,x)
+            return str(kdv_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "add"]]
+            term_list = [[self.mul_terms([ph, "ut_0"]), self.mul_terms([ph, "uxxx_0"]), self.mul_terms(["u_0", "ux_0"])]]
+            return op_list, term_list
 
     def generate_kdv(self, rng, train, ICs=None,coeff = None):
         delta = 0.022
@@ -1486,16 +1560,24 @@ class PDEGenerator(ODEGenerator):
     #     return item
 
     def advection_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "ux_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            adv_expr = ph * sy.diff(u,t) + ph * sy.diff(u,x)
+            return str(adv_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "ux_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_advection(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -1630,24 +1712,32 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def wave_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub"]]
-        if p.extrapolate_pdetypes:
-            term_list = [
-                [
-                    self.mul_terms([ph, "utt_0"]),
-                    self.mul_terms([ph, "uxx_0"]),
-                ]
-            ]
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            wave_expr = ph * sy.diff(u,(t,2)) + ph * sy.diff(u,(x,2))
+            return str(wave_expr)
         else:
-            term_list = [
-                [
-                    Node("utt_0", p),
-                    self.mul_terms([ph, "uxx_0"]),
+            p = self.params
+            ph = self.ph
+            op_list = [["sub"]]
+            if p.extrapolate_pdetypes:
+                term_list = [
+                    [
+                        self.mul_terms([ph, "utt_0"]),
+                        self.mul_terms([ph, "uxx_0"]),
+                    ]
                 ]
-            ]
-        return op_list, term_list
+            else:
+                term_list = [
+                    [
+                        Node("utt_0", p),
+                        self.mul_terms([ph, "uxx_0"]),
+                    ]
+                ]
+            return op_list, term_list
 
     def generate_wave(self, rng, train, ICs=None,coeff = None):
         #  Assume initial velocity is 0
@@ -1774,23 +1864,31 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def diff_logisreact_1D_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxx_0"]),
-                Node(
-                    "mul",
-                    p,
-                    [Node(ph, p), Node("mul", p, [Node("u_0", p), Node("sub", p, [Node(ph, p), Node("u_0", p)])])],
-                ),
-                # self.mul_terms([ph, "u_0"]),
-                # self.mul_terms([ph, "u_0", "u_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            diff_logisreact_1D_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2)) - ph * (u * (1-u))
+            return str(diff_logisreact_1D_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                    Node(
+                        "mul",
+                        p,
+                        [Node(ph, p), Node("mul", p, [Node("u_0", p), Node("sub", p, [Node(ph, p), Node("u_0", p)])])],
+                    ),
+                    # self.mul_terms([ph, "u_0"]),
+                    # self.mul_terms([ph, "u_0", "u_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_diff_logisreact_1D(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -1907,17 +2005,25 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def diff_linearreact_1D_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxx_0"]),
-                self.mul_terms([ph, "u_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            diff_linearreact_1D_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2)) - ph * u
+            return str(diff_linearreact_1D_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                    self.mul_terms([ph, "u_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_diff_linearreact_1D(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -2025,31 +2131,40 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def diff_bistablereact_1D_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxx_0"]),
-                Node(
-                    "mul",
-                    p,
-                    [
-                        Node(
-                            "mul",
-                            p,
-                            [
-                                Node(ph, p),
-                                Node("mul", p, [Node("u_0", p), Node("sub", p, [Node(str(1), p), Node("u_0", p)])]),
-                            ],
-                        ),
-                        Node("sub", p, [Node("u_0", p), Node(ph, p)]),
-                    ],
-                ),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+            a = 0
+
+            diff_bistablereact_1D_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2)) - ph * (u * (1 - u) * (u - a))
+            return str(diff_bistablereact_1D_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                    Node(
+                        "mul",
+                        p,
+                        [
+                            Node(
+                                "mul",
+                                p,
+                                [
+                                    Node(ph, p),
+                                    Node("mul", p, [Node("u_0", p), Node("sub", p, [Node(str(1), p), Node("u_0", p)])]),
+                                ],
+                            ),
+                            Node("sub", p, [Node("u_0", p), Node(ph, p)]),
+                        ],
+                    ),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_diff_bistablereact_1D(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -2169,31 +2284,39 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def diff_squarelogisticreact_1D_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "uxx_0"]),
-                Node(
-                    "mul",
-                    p,
-                    [
-                        Node(ph, p),
-                        Node(
-                            "mul",
-                            p,
-                            [
-                                Node("pow2", p, [Node("u_0", p)]),
-                                Node("pow2", p, [Node("sub", p, [Node(str(1), p), Node("u_0", p)])]),
-                            ],
-                        ),
-                    ],
-                ),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            diff_squarelogisreact_1D_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2)) - ph * ((u ** 2) * (1 - u) ** 2)
+            return str(diff_squarelogisreact_1D_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                    Node(
+                        "mul",
+                        p,
+                        [
+                            Node(ph, p),
+                            Node(
+                                "mul",
+                                p,
+                                [
+                                    Node("pow2", p, [Node("u_0", p)]),
+                                    Node("pow2", p, [Node("sub", p, [Node(str(1), p), Node("u_0", p)])]),
+                                ],
+                            ),
+                        ],
+                    ),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_diff_squarelogisticreact_1D(self, rng, train, ICs=None,coeff = None):
         p = self.params
@@ -2300,17 +2423,25 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def burgers_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                self.mul_terms([ph, "u_0", "ux_0"]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            burgers_expr = ph * sy.diff(u,t) + ph * sy.diff(((1/2)*u**2),x) - ph * sy.diff(u,(x,2))
+            return str(burgers_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    self.mul_terms([ph, "u_0", "ux_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_burgers(self, rng, train, ICs=None,coeff = None):
 
@@ -2341,6 +2472,8 @@ class PDEGenerator(ODEGenerator):
 
             burgers_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/2)*u**2),x) - (eps/np.pi) * sy.diff(u,(x,2))
             item["tree"] = str(burgers_expr)
+            # burgers_expr = -1 * sy.diff(u,(x,2)) * (eps/np.pi) + sy.diff(u,t) * coeff + sy.diff(u,x) * k * u
+            # item["tree"] = str(burgers_expr)
         else:
 
             op_list = [["add", "sub"]]
@@ -2351,6 +2484,17 @@ class PDEGenerator(ODEGenerator):
                     self.mul_terms([str(eps / np.pi), "uxx_0"]),
                 ]
             ]
+            
+            #Generating a mixed burgers tree for training (testing sympy)
+            #op_list = [["add","add"]]
+            #term_list = [
+            #    [
+            #        self.mul_terms([str(-1), "uxx_0", str(eps / np.pi)]),
+            #        self.mul_terms(["ut_0", str(coeff)]),
+            #        self.mul_terms(["ux_0", str(k), "u_0"]),
+            #    ]
+            #]
+            
             # Used in testing whether permutation is important.
             #term_list, op_list = self.randomize_tree(term_list, op_list)
             # Comment when not using.
@@ -2496,11 +2640,19 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def inviscid_burgers_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add"]]
-        term_list = [[self.mul_terms([ph,"ut_0"]), self.mul_terms([ph, "u_0", "ux_0"])]]
-        return op_list, term_list
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            inv_burgers_expr = ph * sy.diff(u,t) + ph * sy.diff(((1/2)*u**2),x)
+            return str(inv_burgers_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add"]]
+            term_list = [[self.mul_terms([ph,"ut_0"]), self.mul_terms([ph, "u_0", "ux_0"])]]
+            return op_list, term_list
 
     def generate_inviscid_burgers(self, rng, train, ICs=None, coeff = None):
         item = {"type": "inviscid_burgers"}
@@ -2521,14 +2673,26 @@ class PDEGenerator(ODEGenerator):
 
             inv_burgers_expr = coeff * sy.diff(u,t) + k * sy.diff(((1/2)*u**2),x)
             item["tree"] = str(inv_burgers_expr)
+            # inv_burgers_expr = sy.diff(u,x) * k * u + sy.diff(u,t) * coeff
+            # item["tree"] = str(inv_burgers_expr)
         else:
             op_list = [["add"]]
             term_list = [
-                [
-                    self.mul_terms([str(coeff),"ut_0"]),
-                    self.mul_terms([str(k), "u_0", "ux_0"]),
-                ]
+               [
+                   self.mul_terms([str(coeff),"ut_0"]),
+                   self.mul_terms([str(k), "u_0", "ux_0"]),
+               ]
             ]
+            
+            #Used in testing sympy.
+            # op_list = [["add"]]
+            # term_list = [
+            #     [
+            #         self.mul_terms(["ux_0",str(k),"u_0"]),
+            #         self.mul_terms(["ut_0",str(coeff)]),
+            #     ]
+            # ]
+            
             # Used in testing whether permutation is important.
             #term_list, op_list = self.randomize_tree(term_list, op_list)
             # Comment when not using.
@@ -2673,17 +2837,25 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def conservation_linearflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph,"ut_0"]),
-                self.mul_terms([ph, "ux_0"]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            cons_linearflux_expr = ph * sy.diff(u,t) + ph * sy.diff(u,x) - ph * sy.diff(u,(x,2))
+            return str(cons_linearflux_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph,"ut_0"]),
+                    self.mul_terms([ph, "ux_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_conservation_linearflux(self, rng, train, ICs=None,coeff=None):
         p = self.params
@@ -2912,17 +3084,25 @@ class PDEGenerator(ODEGenerator):
     #     return item
 
     def conservation_cubicflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph,"ut_0"]),
-                self.mul_terms([ph, "u_0", "u_0", "ux_0"]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            cons_cubicflux_expr = ph * sy.diff(u,t) + ph * sy.diff(((1/3)*(u**3)),x) - ph * sy.diff(u,(x,2))
+            return str(cons_cubicflux_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph,"ut_0"]),
+                    self.mul_terms([ph, "u_0", "u_0", "ux_0"]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_conservation_cubicflux(self, rng, train, ICs=None,coeff=None):
         p = self.params
@@ -3121,16 +3301,24 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def inviscid_conservation_cubicflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add"]]
-        term_list = [
-            [
-                self.mul_terms([ph,"ut_0"]),
-                self.mul_terms([ph, "u_0", "u_0", "ux_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            inv_cubicflux_expr = ph * sy.diff(u,t) + ph * sy.diff(((1/3)*(u**3)),x) 
+            return str(inv_cubicflux_expr)
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph,"ut_0"]),
+                    self.mul_terms([ph, "u_0", "u_0", "ux_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_inviscid_conservation_cubicflux(self, rng, train, ICs=None,coeff=None):
 
@@ -3316,17 +3504,25 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def conservation_sinflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                Node("mul", p, [Node(ph, p), Node("mul", p, [Node("cos", p, [Node("u_0", p)]), Node("ux_0", p)])]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            cons_sinflux_expr = ph * sy.diff(u,t) + ph * sy.diff((sy.sin(u)),x) - ph * sy.diff(u,(x,2))
+            return str(cons_sinflux_expr.doit())
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    Node("mul", p, [Node(ph, p), Node("mul", p, [Node("cos", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_conservation_sinflux(self, rng, train, ICs=None,coeff=None):
         p = self.params
@@ -3356,8 +3552,8 @@ class PDEGenerator(ODEGenerator):
             x, t = sy.symbols('x t')
             u = sy.Function('u_0')(x, t)
 
-            cons_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(x)),x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = str(cons_sinflux_expr)
+            cons_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(u)),x) - (eps / np.pi) * sy.diff(u,(x,2))
+            item["tree"] = str(cons_sinflux_expr.doit())
         else:
             op_list = [["add", "sub"]]
             term_list = [
@@ -3519,16 +3715,24 @@ class PDEGenerator(ODEGenerator):
         return item
 
     def inviscid_conservation_sinflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add"]]
-        term_list = [
-            [
-                self.mul_terms([ph,"ut_0"]),
-                Node("mul", p, [Node(ph, p), Node("mul", p, [Node("cos", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            inv_sinflux_expr = ph * sy.diff(u,t) + ph * sy.diff((sy.sin(u)),x) 
+            return str(inv_sinflux_expr.doit())
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add"]]
+            term_list = [
+                [
+                    self.mul_terms([ph,"ut_0"]),
+                    Node("mul", p, [Node(ph, p), Node("mul", p, [Node("cos", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_inviscid_conservation_sinflux(self, rng, train, ICs=None,coeff=None):
 
@@ -3551,8 +3755,8 @@ class PDEGenerator(ODEGenerator):
             x, t = sy.symbols('x t')
             u = sy.Function('u_0')(x, t)
 
-            inv_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(x)),x) 
-            item["tree"] = str(inv_sinflux_expr)
+            inv_sinflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.sin(u)),x) 
+            item["tree"] = str(inv_sinflux_expr.doit())
         else:
             op_list = [["add"]]
             term_list = [
@@ -3720,17 +3924,25 @@ class PDEGenerator(ODEGenerator):
 
 
     def conservation_cosflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                Node("mul", p, [Node(ph, p), Node("mul", p, [Node("sin", p, [Node("u_0", p)]), Node("ux_0", p)])]),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            cons_cosflux_expr = ph * sy.diff(u,t) + ph * sy.diff((sy.cos(u)),x) - ph * sy.diff(u,(x,2))
+            return str(cons_cosflux_expr.doit())
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    Node("mul", p, [Node(ph, p), Node("mul", p, [Node("sin", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_conservation_cosflux(self, rng, train, ICs=None,coeff=None):
         p = self.params
@@ -3763,8 +3975,8 @@ class PDEGenerator(ODEGenerator):
             x, t = sy.symbols('x t')
             u = sy.Function('u_0')(x, t)
 
-            cons_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(x)),x) - (eps / np.pi) * sy.diff(u,(x,2))
-            item["tree"] = str(cons_cosflux_expr)
+            cons_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(u)),x) - (eps / np.pi) * sy.diff(u,(x,2))
+            item["tree"] = str(cons_cosflux_expr.doit())
         else:
 
             op_list = [["sub", "sub"]]
@@ -3928,16 +4140,24 @@ class PDEGenerator(ODEGenerator):
 
 
     def inviscid_conservation_cosflux_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph,"ut_0"]),
-                Node("mul", p, [Node(ph, p), Node("mul", p, [Node("sin", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+
+            inv_cosflux_expr = ph * sy.diff(u,t) + ph * sy.diff((sy.cos(u)),x)
+            return str(inv_cosflux_expr.doit())
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph,"ut_0"]),
+                    Node("mul", p, [Node(ph, p), Node("mul", p, [Node("sin", p, [Node("u_0", p)]), Node("ux_0", p)])]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_inviscid_conservation_cosflux(self, rng, train, ICs=None,coeff=None):
 
@@ -3963,8 +4183,8 @@ class PDEGenerator(ODEGenerator):
             x, t = sy.symbols('x t')
             u = sy.Function('u_0')(x, t)
 
-            inv_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(x)),x)
-            item["tree"] = str(inv_cosflux_expr)
+            inv_cosflux_expr = coeff * sy.diff(u,t) + k * sy.diff((sy.cos(u)),x)
+            item["tree"] = str(inv_cosflux_expr.doit())
         else:
             op_list = [["sub"]]
             term_list = [
@@ -4132,36 +4352,45 @@ class PDEGenerator(ODEGenerator):
 
 
     def fplanck_tree_list(self):
-        p = self.params
-        ph = self.ph
-        op_list = [["add", "sub", "sub"]]
-        term_list = [
-            [
-                self.mul_terms([ph, "ut_0"]),
-                Node(
-                    "mul",
-                    p,
-                    [
-                        Node(ph, p),
-                        Node(
-                            "mul", p, [Node("cos", p, [Node("mul", p, [Node("u_0", p), Node(ph, p)])]), Node("u_0", p)]
-                        ),
-                    ],
-                ),
-                Node(
-                    "mul",
-                    p,
-                    [
-                        Node(ph, p),
-                        Node(
-                            "mul", p, [Node("sin", p, [Node("mul", p, [Node("u_0", p), Node(ph, p)])]), Node("ux_0", p)]
-                        ),
-                    ],
-                ),
-                self.mul_terms([ph, "uxx_0"]),
+        if self.params.use_sympy:
+            ph = sy.symbols('PLACEHOLDER')
+            x,t = sy.symbols('x t')
+            u = sy.Function('u_0')(x,t)
+            U =  sy.cos(x*ph)
+
+            fplanck_expr = ph * sy.diff(u,t) - ph * sy.diff(u,(x,2)) + ph * sy.diff((sy.diff(U,x) * u),x)
+            return str(fplanck_expr.doit())
+        else:
+            p = self.params
+            ph = self.ph
+            op_list = [["add", "sub", "sub"]]
+            term_list = [
+                [
+                    self.mul_terms([ph, "ut_0"]),
+                    Node(
+                        "mul",
+                        p,
+                        [
+                            Node(ph, p),
+                            Node(
+                                "mul", p, [Node("cos", p, [Node("mul", p, [Node("u_0", p), Node(ph, p)])]), Node("u_0", p)]
+                            ),
+                        ],
+                    ),
+                    Node(
+                        "mul",
+                        p,
+                        [
+                            Node(ph, p),
+                            Node(
+                                "mul", p, [Node("sin", p, [Node("mul", p, [Node("u_0", p), Node(ph, p)])]), Node("ux_0", p)]
+                            ),
+                        ],
+                    ),
+                    self.mul_terms([ph, "uxx_0"]),
+                ]
             ]
-        ]
-        return op_list, term_list
+            return op_list, term_list
 
     def generate_fplanck(self, rng, train, ICs=None,coeff = None):
         #
@@ -4189,9 +4418,9 @@ class PDEGenerator(ODEGenerator):
             x, t = sy.symbols('x t')
             u = sy.Function('u_0')(x, t)
 
-            U = c * sy.cos()
+            U = c * sy.cos(x*um/L)
 
-            fplanck_expr = coeff_t * sy.diff(u,t) - (scipy.constants.k * temperature / (drag* um**2)) * sy.diff(u(x,2)) + (1/(drag * um**2)) * sy.diff((sy.diff(c * sy.cos((x * um)/L)),x) * u)
+            fplanck_expr = coeff_t * sy.diff(u,t) - (scipy.constants.k * temperature / (drag* um**2)) * sy.diff(u,(x,2)) + (1/(drag * um**2)) * sy.diff((sy.diff(U,x) * u),x)
             item["tree"] = str(fplanck_expr)
         else:
             op_list = [["add", "sub", "sub"]]

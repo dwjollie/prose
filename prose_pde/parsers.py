@@ -349,6 +349,7 @@ def get_parser():
     parser.add_argument("--plot_worst", action="store_true", default=False,
                         help="plot worst")
     parser.add_argument("--text_ode_solve", action="store_true", default=False, help="use text output as ODE map")
+    parser.add_argument("--use_text_refinement", action="store_true",default=False,help="use a Bayesian particle filter to refine parameters in text outputs")
     parser.add_argument("--eval_from_exp", type=str, default="", help="Path of experiment to use")
     parser.add_argument("--eval_data", type=str, default="", help="Path of data to eval")
 

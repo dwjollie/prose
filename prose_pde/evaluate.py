@@ -13,10 +13,15 @@ from matplotlib import pyplot as plt
 from scipy.integrate import solve_ivp
 from tabulate import tabulate
 import sympy as sy
+import scipy
+from jax import numpy as jnp
 
 from tqdm import tqdm
 import h5py
 from sklearn.metrics import r2_score
+
+from symbolicregression.envs.data_gen_NLE import  diff_react_1D_f, burgers_f
+from symbolicregression.envs.fplanck import fokker_planck, boundary, gaussian_pdf, delta_function, uniform_pdf
 
 # np.seterr(all="raise")
 np.seterr(divide="raise", under="ignore", over="raise", invalid="raise")
@@ -383,6 +388,12 @@ class Evaluator(object):
             text_data_loss = 0.0
             text_valid_output = 0
             output_grid = env.generator.t_eval[eval_output_start : eval_output_end : params.eval_output_step]
+        elif params.use_text_refinement:
+            #Use text output + Particle Filter
+            data_loss_valid = 0.0
+            text_data_loss = 0.0
+            text_valid_output = 0
+            output_grid = env.generator.t_eval[eval_output_start : eval_output_end : params.eval_output_step]
 
         for samples, _ in iterator:
             data_seqs = samples["data"]  # (bs, data_len, output_dim) or (bs, data_len, x_grid_size, output_dim)
@@ -575,21 +586,20 @@ class Evaluator(object):
                     valid_loss = []
 
                     for tree in tree_list:
+                        t_grid = np.linspace(0.0, self.params.t_range, self.params.t_num)
+                        x_grid = np.linspace(0.0, self.params.x_range, self.params.x_num)
+                        coeff = np.random.uniform(-5, 5, size=(8, self.params.max_input_dimension))
+                        # Create mesh grids
+                        T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
+
+                        x, t = sy.symbols('x t')
+                        u = sy.Function('u_0')(x,t)
+                        tens_poly = (coeff[0, 0] + coeff[1, 0] * t + coeff[2, 0] * t**2) * (
+                                coeff[3, 0] + coeff[4, 0] * x + coeff[5, 0] * x**2 + coeff[6, 0] * x**3 + coeff[7, 0] * x**4)
                         if self.params.use_sympy:
                             try:
-                                t_grid = np.linspace(0.0, self.params.t_range, self.params.t_num)
-                                x_grid = np.linspace(0.0, self.params.x_range, self.params.x_num)
-                                coeff = np.random.uniform(-5, 5, size=(8, self.params.max_input_dimension))
-                                # Create mesh grids
-                                T, X = np.meshgrid(t_grid, x_grid, indexing="ij")
-
-                                x, t = sy.symbols('x t')
-                                u = sy.Function('u_0')(x,t)
-                                tens_poly = (coeff[0, i] + coeff[1, i] * T + coeff[2, i] * T**2) * (
-                                        coeff[3, i] + coeff[4, i] * X + coeff[5, i] * X**2 + coeff[6, i] * X**3 + coeff[7, i] * X**4
-                                    )
-                                
-                                expr = tree.subs(u,tens_poly)
+                                equation = sy.sympify(tree[0])  
+                                expr = equation.subs(u,tens_poly)
                                 eval_expr = sy.lambdify([x,t],expr.doit(),"numpy")
                                 generated_outputs = eval_expr(X,T)
                             except:
@@ -597,7 +607,6 @@ class Evaluator(object):
                         else:
                             try:
                                 generated_outputs = tree.val(input_points, self.space_dim)
-
                             except:
                                 continue
 
@@ -606,10 +615,37 @@ class Evaluator(object):
                             #     label_outputs = tree[i].val(input_points)
                             # else:
                             #     label_outputs = tree[i].val(t_grid, x_grid,coeff)
-                            label_outputs = trees[i].val(input_points, self.space_dim)
+                            if self.params.use_sympy:
+                                tree_expr = trees[i]
+                                
+                                #start of removing systematic parts of the "trees" string of the form "[eqn]" to get eqn
+                                original_expr = ""
+                                amt_terms = len(tree_expr)
+                                terms_to_remove = [0, amt_terms, amt_terms-1]
+                                for k in range(len(tree_expr)):
+                                    if not k in terms_to_remove:
+                                        original_expr = original_expr + tree_expr[k]
+                                #original_expr = eqn now.
+                                
+                                original_expr = sy.sympify(original_expr)     
+                                original_expr = original_expr.subs(u,tens_poly)
+                                eval_expr = sy.lambdify([x,t],original_expr.doit(),"numpy")
+                                label_outputs = eval_expr(X,T)
+                            else:
+                                label_outputs = trees[i].val(input_points, self.space_dim)
                             assert np.isfinite(label_outputs).all()
                         try:
-                            if np.isfinite(generated_outputs).all():
+                            if self.params.use_sympy:
+                                if num_batches > 1:
+                                    break
+                                if not (np.isnan(generated_outputs).all() and np.size(generated_outputs) == 1):
+                                    valid_loss.append(
+                                    np.sqrt(
+                                        np.sum((generated_outputs - label_outputs) ** 2)
+                                        / (np.sum(label_outputs**2) + eps)
+                                    )
+                                )
+                            elif np.isfinite(generated_outputs).all():
                                 valid_loss.append(
                                     np.sqrt(
                                         np.sum((generated_outputs - label_outputs) ** 2)
@@ -663,6 +699,37 @@ class Evaluator(object):
                                 ) = compute_losses(
                                     text_data_output,
                                     data_seqs[i][eval_output_start : eval_output_end : params.eval_output_step, :dim],
+                                    (params.t_num - input_len) // params.eval_output_step,
+                                    eps,
+                                    params.x_range / params.x_num,
+                                )
+                                text_data_loss += text_rel_loss
+                                text_valid_output += 1
+                        elif params.use_text_refinement:
+                            og_data = np.array(data_seqs[i][: output_len : params.eval_output_step, ..., :dim])
+                            text_data_output = self.refinement(samples["type"][i],
+                                                             tree_list[0][0], 
+                                                             og_data
+                                                             )
+                            if text_data_output is not None:
+                                text_data_output = text_data_output[:,:,np.newaxis]
+                                if "dim" in samples:
+                                    dim = samples["dim"][i]
+                                else:
+                                    dim = data_seqs[i].size(-1)
+                                # print(np.shape(text_data_output))
+                                text_data_output = torch.from_numpy(text_data_output.astype(np.single))  # (t_num, dim)
+                                data_loss_valid += rel_loss
+                                (
+                                    _,
+                                    text_rel_loss,
+                                    _,
+                                    _,
+                                    _,
+                                    _,
+                                ) = compute_losses(
+                                    text_data_output[:,:,:dim],
+                                    data_seqs[i][eval_output_start : eval_output_end : params.eval_output_step, ..., :dim],
                                     (params.t_num - input_len) // params.eval_output_step,
                                     eps,
                                     params.x_range / params.x_num,
@@ -914,6 +981,15 @@ class Evaluator(object):
                     text_valid_output,
                 )
             )
+        elif params.use_text_refinement:
+            logger.info(
+                "Valid text - Data loss: {:.6f} - Data loss from text: {:.6f} - Text valid: {} - Text valid output: {}".format(
+                    data_loss_valid / max(text_valid_output, 1),
+                    text_data_loss / max(text_valid_output, 1),
+                    text_valid,
+                    text_valid_output,
+                )
+            )
 
         # logger.info("text_total: {} | Eval size per gpu: {}".format(text_total, eval_size_per_gpu))
         eval_size_per_gpu = text_total
@@ -1002,3 +1078,2125 @@ class Evaluator(object):
     #         prediction = np.array([])[:,1:]
     #         label_indx = np.array([])[:,0]
     #
+    # 
+    def refinement(self,type,expr,data_input):
+        """
+        Right now this doesn't work... the errors between generated data and observations is quite high. Mostly just burgers work.
+        """
+        p = self.params
+        input_len = self.params.input_len
+        t_eval = self.trainer.t_eval
+        eval_output_start = self.params.eval_output_start
+        eval_output_end = len(t_eval)
+        output_len = (len(t_eval) - input_len) // 2
+        t_eval_step = p.eval_output_step
+        t_grid = np.linspace(0.0, self.params.t_range, self.params.t_num)
+        x_grid = np.linspace(0.0, self.params.x_range, self.params.x_num)
+        output_grid = self.env.generator.t_eval[eval_output_start : eval_output_end : self.params.eval_output_step]
+        output_grid = np.array(output_grid)
+        input_grid = self.env.generator.t_eval[0 : eval_output_start : self.params.eval_output_step]
+        input_grid = np.array(input_grid)
+        # Number of particles
+        # M = 5000
+        M = 0 #for PDE solve
+        # M = 500 #Need to lower for speed.
+        # Time steps
+        T = 1
+        # Grid points.
+        N = p.x_num
+        
+        t_range = self.params.t_range
+        x, t = sy.symbols('x t')
+        u = sy.Function('u_0')(x,t)
+
+        # Define the initial distribution of particles for alpha (uniform distribution)
+        def initial_distribution(init_alpha):
+            return np.random.uniform((0.8 * init_alpha), (1.2 * init_alpha), M)
+        
+        # Propagate particles with noise
+        def propagate_particles(particles, process_noise):
+            noise = np.random.normal(0, process_noise, M)
+            return np.abs(particles + noise)
+        
+        # Resample particles based on their weights using systematic resampling
+        def resample(particles, weights):
+            positions = (np.arange(M) + np.random.uniform(0, 1)) / M
+            indexes = np.zeros(M, 'i')
+            cumulative_sum = np.cumsum(weights)
+            i, j = 0, 0
+            while i < M:
+                if positions[i] < cumulative_sum[j]:
+                    indexes[i] = j
+                    i += 1
+                else:
+                    j += 1
+            return particles[indexes]        
+
+        if type == "heat":
+
+            # Initial diffusion coefficient (alpha) we want to estimate
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr) 
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.001
+
+            # Compute the next state of the heat equation using finite difference
+            def heat_equation_step(u_prev, alpha):
+                u_next = np.copy(u_prev)
+                for i in range(1, N-1):
+                    u_next[i] = u_prev[i] + alpha * (u_prev[i+1] - 2*u_prev[i] + u_prev[i-1])
+                return u_next
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = heat_equation_step(u_prev, particles[i])
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                    if weights.all() == 0:
+                        weights[:] = 0.0000001
+                return weights / np.sum(weights)
+
+
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = heat_equation_step(init_con, estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = heat_equation_step(new_output[cur_t - 1,:], estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "porous_medium":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+            except:
+                return None
+            
+            if expr.coeff(u * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u*sy.diff(u,(x,2)))
+                mode = 2
+            elif expr.coeff(u**2 * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u**2 * sy.diff(u,(x,2)))
+                mode = 3
+            elif expr.coeff(u**3 * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u**3 * sy.diff(u,(x,2)))
+                mode = 4
+            else:
+                return None
+
+            # Observation noise
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.01
+
+            def f_closure(m):
+                m = round(m,2)
+
+                def f(u):
+                    d2um_dx2 = np.zeros_like(u)
+                    dx = p.x_range / p.x_num
+                    um = np.power(u, m)
+                    um[np.argwhere(np.isnan(um))] = 0.0001
+                    # Compute second spatial derivatives using central differences
+                    for i in range(1, p.x_num - 1):
+                        d2um_dx2[i] = (um[i - 1] - 2 * um[i] + um[i + 1]) / dx**2
+
+                    # Periodic boundary conditions
+                    d2um_dx2[0] = (um[-1] - 2 * um[0] + um[1]) / dx**2
+                    d2um_dx2[-1] = (um[-2] - 2 * um[-1] + um[0]) / dx**2
+
+                    du_dt = d2um_dx2
+                    return du_dt
+
+                return f
+        
+            def pm_equation_step(u_prev, alpha):   
+                dt = p.t_range/p.t_num
+                fun = f_closure(alpha)
+                u_next = np.copy(u_prev)
+                u_next = u_prev + fun(u_prev) * dt
+                return u_next
+            
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = pm_equation_step(u_prev, particles[i])
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_m)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            #pm has an issue with taking in weird values..
+            try:
+                # Run the particle filter
+                for t in range(1, T):
+                    # Propagate particles
+                    particles = propagate_particles(particles,process_noise)
+                    
+                    # Compute weights
+                    weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+
+                    # Resample particles
+                    particles = resample(particles, weights)
+
+                    # Estimate the state
+                    estimated_m = np.mean(particles)
+            except:
+                return None
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = pm_equation_step(init_con, estimated_m)
+                    new_output[cur_t + 1,:] = new_val
+                else:
+                    new_val = pm_equation_step(new_output[cur_t - 1,:], estimated_m)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "advection":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,x))
+            except:
+                return None
+
+            # Observation noise
+            obs_noise = 0.25
+
+            # Process noise
+            process_noise = 0.01
+
+            base_frequency = 2 * np.pi / p.x_range
+            n1, n2 = np.random.randint(1, 3, size=2)
+            frequencies = base_frequency * np.array([n1, n2])
+
+            random_phases = np.random.uniform(0, 2 * np.pi, size=2)
+            random_amplitudes = np.random.uniform(0, 1, size=2)
+
+            # Composite wave function
+            def _func(x):
+                # return random_amplitudes[0] * np.sin(
+                #     base_frequency * x + random_phases[0])
+                wave1 = random_amplitudes[0] * np.sin(frequencies[0] * x + random_phases[0])
+                wave2 = random_amplitudes[1] * np.sin(frequencies[1] * x + random_phases[1])
+                return wave1 + wave2
+
+            vec = _func(x_grid.flatten())
+            slope = vec[-1] - vec[0]
+            slope /= p.x_range
+            vec = vec - slope * x_grid.flatten()
+            min, max = np.min(vec), np.max(vec)
+
+            def func(x):
+                    val = _func(x)
+                    linear = slope * x
+                    val = val - linear
+                    val = (val - min) / (max - min)
+                    return val
+            
+            def adv_step(u_prev,beta,t):
+                # y0 = func(self.x_grid.flatten())
+                # max_y0,min_y0 = np.max(y0),np.min(y0)
+                y = [func(u_prev)]
+                # t_eval = self.t_eval / coeff
+                cur_t = t
+                x_adjusted = (x_grid.flatten() - beta * cur_t) % p.x_range
+                y.append(func(x_adjusted))
+                y_new = np.array(y[0])
+            
+                return y_new[-1]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = adv_step(u_prev, particles[i],t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                obs_t = observations[t,:]
+                obs_t_minus_one = observations[t-1,:]
+                # Propagate particles
+                particles = propagate_particles(particles,process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, obs_t, obs_t_minus_one, t_grid[t])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = adv_step(init_con, estimated_alpha, output_t[cur_t])
+                    new_output[cur_t + 1,:] = new_val
+                else:
+                    new_val = adv_step(new_output[cur_t - 1,:], estimated_alpha, output_t[cur_t])
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "kdv":
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,3)))
+            except:
+                return None
+
+            obs_noise = 10
+
+            # Process noise
+            process_noise = 0.00001
+            
+            tf = self.env.generator.pde_generator.tfinals["kdv"]
+            p = self.params
+            coeff = p.t_range / tf
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            dt = output_t[1] - output_t[0]
+
+            # Assuming nx is even for simplicity
+            kx = np.fft.fftfreq(p.x_num, d=p.x_range / p.x_num)
+            kx = 2.0 * np.pi * kx  # Scale by 2*pi for spatial frequency
+            def kdv_step(u_prev,delta2,t):
+                def uhat2vhat(t, uhat):
+                    return np.exp(-1j * (kx**3) * delta2 * t) * uhat
+
+                def vhat2uhat(t, vhat):
+                    return np.exp(1j * (kx**3) * delta2 * t) * vhat
+
+                # ----- Define RHS -----
+                def uhatprime(t, uhat):
+                    u = np.fft.ifft(uhat)
+                    return 1j * (kx**2) * delta2 * uhat - 0.5j * kx * np.fft.fft(u**2)
+
+                def vhatprime(t, vhat):
+                    u = np.fft.ifft(vhat2uhat(t, vhat))
+                    return -0.5j * kx * uhat2vhat(t, np.fft.fft(u**2))
+                
+                base_frequency = 2 * np.pi / p.x_range
+                n1, n2 = np.random.randint(1, 3, size=2)
+                frequencies = base_frequency * np.array([n1, n2])
+
+                random_phases = np.random.uniform(0, 2 * np.pi, size=2)
+                random_amplitudes = np.random.uniform(0, 1, size=2)
+
+                # Composite wave function
+                def _func(x):
+                    # return random_amplitudes[0] * np.sin(
+                    #     base_frequency * x + random_phases[0])
+                    wave1 = random_amplitudes[0] * np.sin(frequencies[0] * x + random_phases[0])
+                    wave2 = random_amplitudes[1] * np.sin(frequencies[1] * x + random_phases[1])
+                    return wave1 + wave2
+
+                vec = _func(x_grid.flatten())
+                slope = vec[-1] - vec[0]
+                slope /= p.x_range
+                vec = vec - slope * x_grid.flatten()
+                min, max = np.min(vec), np.max(vec)
+
+                def func(x):
+                    val = _func(x)
+                    linear = slope * x
+                    val = val - linear
+                    val = (val - min) / (2 * (max - min))
+                    return val
+
+                u0 = np.zeros(np.size(u_prev, axis = 0))
+                u0[:] = u_prev[:,0]
+                uhat0 = np.fft.fft(u0)
+                vhat0 = uhat2vhat(t, uhat0)
+
+                # sol = solve_ivp(
+                #     vhatprime,
+                #     [t / coeff for t in [t, t + dt]],
+                #     vhat0,
+                #     method="RK45",
+                #     t_eval= t_eval / coeff,
+                #     rtol=self.env.generator.pde_generator.rtol,
+                #     atol=self.env.generator.pde_generator.atol,
+                # )
+
+                fun = vhatprime
+                vhat = np.copy(u_prev[:,0])
+                vhat = vhat0 + fun(t,vhat) * dt
+                
+                # u = np.fft.ifft(vhat2uhat(t + dt, vhat))
+                # u = np.zeros((p.x_num), dtype=complex)
+                u = np.fft.ifft(vhat2uhat(t + dt, vhat[:]))
+                u = np.real(u)
+                # if np.all(np.abs(np.imag(u)) < 0.05):
+                #     u = np.real(u)
+                # else:
+                #     raise ValueError
+                # except Exception as e:
+                #     return None
+
+                return u
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = kdv_step(u_prev, particles[i],t)
+                    if u_pred is None:
+                        weights[i] = 1/M
+                    else:
+                        weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles,process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t_grid[t-1])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            new_output = np.zeros((output_len+1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = kdv_step(init_con, estimated_alpha, output_t[cur_t])
+                    new_output[cur_t+1,:] = new_val
+                else:
+                    new_input = new_output[cur_t - 1, :]
+                    new_val = kdv_step(new_input[np.newaxis,:], estimated_alpha, output_t[cur_t])
+                    new_output[cur_t+1,:] = new_val
+            return new_output
+        
+        elif type == "fplanck":
+            #this has a lot of terms. Needs more time devoted to it.
+            um = 1e-6  # micrometer
+            L = 0.1 * um
+            c = 5e-21
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)
+                init_alpha = expr.coeff(sy.cos(x * (um/L)) * u)
+                init_beta = expr.coeff(sy.sin(x * (um/L)) * sy.diff(u,x))
+                init_gamma = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            drag = init_alpha * (L ** 2 / c)                                     #init_alpha = c/(drag * L**2)
+            drag = 1 / drag       
+            temperature = init_gamma * (- um ** 2 / (scipy.constants.k * drag))   #init_gamma = -kT/(drag um**2)  
+      
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.01
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            dt = output_t[1] - output_t[0]
+
+            # Define the potential function U(x) using micrometers
+            U = lambda x: c * np.cos(x / L)
+            def fplanck_step(u_prev, temperature, drag, t):
+                # Setup the fokker_planck simulation with parameters converted to micrometers
+                sim = fokker_planck(
+                    temperature=temperature,
+                    drag=drag,
+                    extent=2 * um,
+                    # extent converted to micrometers
+                    resolution= self.env.generator.pde_generator.dx * um,  # resolution converted to micrometers
+                    boundary=boundary.periodic,
+                    potential=U,
+                )
+
+                p0 = u_prev
+                
+                time, Pt = sim.propagate_interval(p0, (t + dt) * um, Nsteps=2)
+                print(np.shape(Pt))
+                return Pt
+
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_drag, observation, u_prev, t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = fplanck_step(u_prev, particles[i], particles_drag[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(temperature)
+            particles_drag = initial_distribution(drag)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_drag = propagate_particles(particles_drag, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_drag, observations[t,:], observations[t-1,:], t_grid[t-1])
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_temperature = np.mean(particles)
+                estimated_drag = np.mean(particles_drag)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len, N))
+            init_con = observations[-1,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = fplanck_step(init_con, estimated_temperature, estimated_drag, output_t[cur_t])
+                    new_output[cur_t,:] = new_val[:,0]
+                else:
+                    new_val = fplanck_step(new_output[cur_t - 1,:], estimated_temperature,estimated_drag, output_t[cur_t])
+                    new_output[cur_t,:] = new_val
+            return new_output
+
+        elif type == "diff_logisreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(u*(1-u))
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.01
+            
+            tf = self.env.generator.pde_generator.tfinals["diff_logisreact_1D"]
+            coeff_t = p.t_range / tf
+
+            IC_train = True
+            GivenIC = None
+            numbers = 10
+            CFL = 0.35
+            def diff_logisreact_step(u_prev, rho, nu, t):
+
+                uu = diff_react_1D_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range/coeff_t,
+                    self.env.generator.pde_generator.dt/coeff_t,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    rho,
+                    nu,
+                    IC_train=IC_train,
+                    GivenIC = u_prev,
+                )
+            
+                return uu[0,t,:,0]
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_nu, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = diff_logisreact_step(u_prev, particles[i], particles_nu[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_rho)
+            particles_b = initial_distribution(init_nu)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_rho = np.mean(particles)
+                estimated_nu = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len+1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = diff_logisreact_step(init_con, estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t+1,:] = new_val[:,0]
+                else:
+                    new_val = diff_logisreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t+1,:] = new_val
+            return new_output
+        
+        elif type == "diff_linearreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(u)
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.01
+            
+            tf = self.env.generator.pde_generator.tfinals["diff_linearreact_1D"]
+            coeff_t = p.t_range/tf
+            IC_train = True
+            GivenIC = None
+            numbers = 10
+            CFL = 0.35
+            def diff_linearreact_step(u_prev, rho, nu, t):
+
+                uu = diff_react_1D_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range/coeff_t,
+                    self.env.generator.pde_generator.dt/coeff_t,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    rho,
+                    nu,
+                    react_term="linear",
+                    IC_train=IC_train,
+                    GivenIC = u_prev,
+                )
+            
+                return uu[0,t,:,0]
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_nu, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = diff_linearreact_step(u_prev, particles[i], particles_nu[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_rho)
+            particles_b = initial_distribution(init_nu)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_rho = np.mean(particles)
+                estimated_nu = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len+1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = diff_linearreact_step(init_con, estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = diff_linearreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "diff_bistablereact_1D": 
+            # Note: It is possible to add a into this.
+            try:
+                expr = sy.sympify(expr)
+                expr_expanded = sy.expand(expr)
+                expr_expanded = sy.simplify(expr_expanded)
+                init_rho = -1 * expr_expanded.coeff(u**3)       #rho u(1-u)(u-1) = -rho u**3 + rho(1+a)u**2 - a rho u
+                init_a = expr_expanded.coeff(u) / (-init_rho)   # will return 0 if it doesn't exist
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.001
+            
+            tf = self.env.generator.pde_generator.tfinals["diff_bistablereact_1D"]
+            coeff_t = tf/p.t_range
+            IC_train = True
+            GivenIC = None
+            numbers = 10
+            CFL = 0.35
+            def diff_bistablereact_step(u_prev, rho, nu, t):
+
+                uu = diff_react_1D_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range/coeff_t,
+                    self.env.generator.pde_generator.dt/coeff_t,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    rho,
+                    nu,
+                    react_term="bistable",
+                    IC_train=IC_train,
+                    GivenIC = u_prev,
+                )
+            
+                return uu[0,t,:,0]
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_nu, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = diff_bistablereact_step(u_prev, particles[i], particles_nu[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_rho)
+            particles_b = initial_distribution(init_nu)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_rho = np.mean(particles)
+                estimated_nu = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = diff_bistablereact_step(init_con, estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = diff_bistablereact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "diff_squarelogisticreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(((u ** 2) * (1 - u) ** 2))
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+            
+            tf = self.env.generator.pde_generator.tfinals["diff_squarelogisticreact_1D"]
+            coeff_t = p.t_range /tf
+            IC_train = True
+            numbers = 10
+            CFL = 0.35
+            def diff_squarelogisticreact_step(u_prev, rho, nu, t):
+
+                uu = diff_react_1D_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range/coeff_t,
+                    self.env.generator.pde_generator.dt /coeff_t,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    rho,
+                    nu,
+                    react_term="squarelogistic",
+                    IC_train=IC_train,
+                    GivenIC = u_prev,
+                )
+            
+                return uu[0,t,:,0]
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_nu, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = diff_squarelogisticreact_step(u_prev, particles[i], particles_nu[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_rho)
+            particles_b = initial_distribution(init_nu)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_rho = np.mean(particles)
+                estimated_nu = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = diff_squarelogisticreact_step(init_con, estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = diff_squarelogisticreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "burgers":
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u*sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 5
+
+            # Process noise
+            process_noise = 0.01
+            process_noise_b = 0.0001
+
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def burgers_step(u_prev, eps, k, t_eval):
+                GivenIC = u_prev
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    eps,
+                    k,
+                    fluxx="quadratic",
+                    IC_train=IC_train,
+                    GivenIC=GivenIC,
+                    mode=mode
+                )
+                return uu[-1,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = burgers_step(u_prev, particles[i], particles_k[i], t_eval)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+
+            # Initial distribution of particles
+            particles = initial_distribution(init_eps)
+            particles_b = initial_distribution(init_k)
+
+            # ## Used in solving directly from given k, eps
+            estimated_k = np.float64(init_k)
+            estimated_eps = np.float64(init_eps)
+            # ####
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_eps = np.mean(particles)
+                estimated_k = np.mean(particles_b)
+
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            new_val = burgers_step(init_con, estimated_eps, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = burgers_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output
+        
+        elif type == "conservation_linearflux":
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+            
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["conservation_linearflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def linear_flux_step(u_prev, eps, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    eps,
+                    k,
+                    fluxx="linear",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_k, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = linear_flux_step(u_prev, particles[i], particles_k[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_eps)
+            particles_b = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_eps = np.mean(particles)
+                estimated_k = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = linear_flux_step(init_con, estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = linear_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "conservation_sinflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.cos(u))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+            
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["conservation_sinflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def sin_flux_step(u_prev, eps, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    eps,
+                    k,
+                    fluxx="sin",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_k, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = sin_flux_step(u_prev, particles[i], particles_k[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_eps)
+            particles_b = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_eps = np.mean(particles)
+                estimated_k = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = sin_flux_step(init_con, estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = sin_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "conservation_cosflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.sin(u))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+            
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["conservation_cosflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def cos_flux_step(u_prev, eps, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    eps,
+                    k,
+                    fluxx="cos",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_k, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = cos_flux_step(u_prev, particles[i], particles_k[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_eps)
+            particles_b = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_eps = np.mean(particles)
+                estimated_k = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = cos_flux_step(init_con, estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = cos_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "conservation_cubicflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u ** 2 * sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+            
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["conservation_cubicflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def cubic_flux_step(u_prev, eps, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    eps,
+                    k,
+                    fluxx="cubic",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, particles_k, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = cubic_flux_step(u_prev, particles[i], particles_k[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_eps)
+            particles_b = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_eps = np.mean(particles)
+                estimated_k = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = cubic_flux_step(init_con, estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = cubic_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "inviscid_burgers":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u*sy.diff(u,x))
+                estimated_k = np.float64(init_k)
+            except:
+                return None
+
+
+            obs_noise = 5
+
+            # Process noise
+            process_noise = 0.01
+
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+
+            def inv_burgers_step(u_prev, k, t_eval):
+                GivenIC = u_prev
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    0,
+                    k,
+                    viscous = False,
+                    fluxx="quadratic",
+                    IC_train=IC_train,
+                    GivenIC=GivenIC,
+                    mode=mode
+                )
+                return uu[-1,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev, t_eval):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = inv_burgers_step(u_prev, particles[i], t_eval)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+
+            # Initial distribution of particles
+            particles = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], input_grid[t-1])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_k = np.mean(particles)
+
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            new_val = inv_burgers_step(init_con, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = inv_burgers_step(new_output[cur_t,:], estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output
+        
+        elif type == "conservation_linearflux":
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+
+            obs_noise = 5
+
+            # Process noise
+            process_noise = 0.1
+
+            IC_train = False
+            numbers = 128
+            mode = "copy"
+            tf = self.env.generator.pde_generator.tfinals["inviscid_burgers"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            the_plot = []
+
+
+            def inv_burgers_step(u_prev, k, t):
+                u_zero = np.zeros((128,128,1,1))
+                u_zero[0,:,0,0] = u_prev.transpose()
+                GivenIC = u_zero
+
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    p.t_range / (2 * coeff),
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num // 4,
+                    CFL,
+                    numbers,
+                    20,
+                    np.random.randint(100000),
+                    0,
+                    k,
+                    viscous=False,
+                    fluxx="quadratic",
+                    IC_train=IC_train,
+                    GivenIC=GivenIC,
+                    mode=mode
+                )
+                if t == "all":
+                    return uu[:,0,:,0]
+                else:
+                    return uu[:,0,t,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t,l):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = inv_burgers_step(u_prev, particles[i], t)
+                    l.append(u_pred)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights), l
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                
+                # Compute weights
+                weights, the_plot = compute_weights(particles, observations[t,:], observations[t-1,:], t, the_plot)
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_k = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            new_val = inv_burgers_step(init_con, estimated_eps, estimated_k, "all")
+            new_output[1:,:] = new_val.transpose()
+            for i in range(len(the_plot)):
+                plt.plot(the_plot)
+                plt.axis("off")
+            plt.show()
+
+            return new_output
+
+        elif type == "inviscid_conservation_sinflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.cos(u))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_sinflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def inv_sin_step(u_prev, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    self.rng.randint(100000),
+                    0,
+                    k,
+                    viscous=False,
+                    fluxx="sin",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = inv_sin_step(u_prev, particles[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_k = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = inv_sin_step(init_con, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = inv_sin_step(new_output[cur_t - 1], estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "inviscid_conservation_cosflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.sin(u))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_cosflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def inv_cos_step(u_prev, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    self.rng.randint(100000),
+                    0,
+                    k,
+                    viscous=False,
+                    fluxx="cos",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = inv_cos_step(u_prev, particles[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_k = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = inv_cos_step(init_con, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = inv_cos_step(new_output[cur_t - 1], estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "inviscid_conservation_cubicflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u ** 2 * sy.diff(u,x))
+            except:
+                return None
+    
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+
+            IC_train = True
+            numbers = 10
+            mode = "periodic"
+            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_cubicflux"]
+            coeff = p.t_range/tf
+            CFL = 0.4
+
+            def inv_cubic_step(u_prev, k, t):
+                uu = burgers_f(
+                    p.x_range,
+                    0.0,
+                    p.x_num,
+                    0.0,
+                    p.t_range / coeff,
+                    self.env.generator.pde_generator.dt / coeff,
+                    p.t_num,
+                    CFL,
+                    numbers,
+                    20,
+                    self.rng.randint(100000),
+                    0,
+                    k,
+                    viscous=False,
+                    fluxx="cubic",
+                    IC_train=IC_train,
+                    GivenIC=u_prev,
+                    mode=mode
+                )
+                return uu[0,t,:,0]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = inv_cubic_step(u_prev, particles[i], t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_k)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_k = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = inv_cubic_step(init_con, estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = inv_cubic_step(new_output[cur_t - 1], estimated_k, cur_t)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "cahnhilliard_1D":
+            # DOES NOT INFER 6.
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,4)))
+            except:
+                return None
+
+            # Observation noise
+            obs_noise = 0.0000005
+
+            # Process noise
+            process_noise = 0.00000001
+        
+            def f_closure(eps):
+
+                def f(t, u):
+                    d2u_dx2 = np.zeros_like(u)
+                    rhs = np.zeros_like(u)
+                    dx = p.x_range / p.x_num
+                    # Compute second spatial derivatives using central differences
+                    for i in range(1, p.x_num - 1):
+                        d2u_dx2[i] = (u[i - 1] - 2 * u[i] + u[i + 1]) / dx**2
+
+                    # Periodic boundary conditions
+                    d2u_dx2[0] = (u[-1] - 2 * u[0] + u[1]) / dx**2
+                    d2u_dx2[-1] = (u[-2] - 2 * u[-1] + u[0]) / dx**2
+
+                    f = u**3 - u
+                    fu = 3 * u**2 - 1
+
+                    d2u_dx2af = eps**2 * d2u_dx2 + fu
+
+                    for i in range(1, p.x_num - 1):
+                        rhs[i] = (d2u_dx2af[i - 1] - 2 * d2u_dx2af[i] + d2u_dx2af[i + 1]) / dx**2
+
+                    # Periodic boundary conditions
+                    rhs[0] = (d2u_dx2af[-1] - 2 * d2u_dx2af[0] + d2u_dx2af[1]) / dx**2
+                    rhs[-1] = (d2u_dx2af[-2] - 2 * d2u_dx2af[-1] + d2u_dx2af[0]) / dx**2
+
+                    du_dt = -d2u_dx2af
+                    return du_dt
+
+                return f
+    
+            def ch_equation_step(u_prev, eps):   
+                dt = p.t_range/p.t_num
+                fun = f_closure(eps)
+                u_next = np.copy(u_prev)
+                u_next = u_prev + fun(u_prev) * dt
+                return u_next
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = ch_equation_step(u_prev, particles[i])
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+        
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles,process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = ch_equation_step(init_con, estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = ch_equation_step(new_output[cur_t - 1], estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+
+        elif type == "wave":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+            except:
+                return None
+    
+            obs_noise = 0.05
+
+            # Process noise
+            process_noise = 0.001
+
+            tf = self.env.generator.pde_generator.tfinals["wave"]
+            coeff_t = p.t_range / tf
+            t_eval = t_grid / coeff_t
+
+            base_frequency = 2 * np.pi / p.x_range
+            n1, n2 = np.random.randint(1, 3, size=2)
+            frequencies = base_frequency * np.array([n1, n2])
+
+            random_phases = np.random.uniform(0, 2 * np.pi, size=2)
+            random_amplitudes = np.random.uniform(0, 1, size=2)
+
+            # Composite wave function
+            def _func(x):
+                # return random_amplitudes[0] * np.sin(
+                #     base_frequency * x + random_phases[0])
+                wave1 = random_amplitudes[0] * np.sin(frequencies[0] * x + random_phases[0])
+                wave2 = random_amplitudes[1] * np.sin(frequencies[1] * x + random_phases[1])
+                return wave1 + wave2
+
+            vec = _func(x_grid.flatten())
+            slope = vec[-1] - vec[0]
+            slope /= p.x_range
+            vec = vec - slope * x_grid.flatten()
+            min, max = np.min(vec), np.max(vec)
+
+            def func(x):
+                val = _func(x)
+                linear = slope * x
+                val = val - linear
+                val = (val - min) / (max - min)
+                return val
+            
+            def wave_step(u,beta,t):
+                y = [func(u)]
+                cur_t = t
+                x_adjusted1 = (x_grid.flatten() - beta * cur_t) % p.x_range
+                x_adjusted2 = (x_grid.flatten() + beta * cur_t) % p.x_range
+                y.append(0.5 * func(x_adjusted1) + 0.5 * func(x_adjusted2))
+                y = np.array(y[0])
+                return y[-1]
+            
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev,t):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = wave_step(u_prev, particles[i],t)
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles,process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = wave_step(init_con, estimated_alpha, output_t[cur_t])
+                    new_output[cur_t + 1,:] = new_val
+                else:
+                    new_val = wave_step(new_output[cur_t - 1], estimated_alpha, output_t[cur_t])
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        elif type == "Klein_Gordon":
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+                init_beta = expr.coeff(u)
+            except:
+                return None
+        
+            # Observation noise
+            obs_noise_a = 0.005
+            obs_noise_b = 0.00005
+
+            # Process noise
+            process_noise = 0.00001
+        
+            def kg_step(u_prev, alpha, beta):
+                u_next = np.copy(u_prev)
+                for i in range(1,N-1):
+                    u_next[i] = alpha*(u_prev[i+1] - 2.0 * u_prev[i] + u_prev[i-1]) - beta * u_prev[i] +  2.0 * u_prev[i] -u_prev[i-1]
+
+                return u_next
+
+            # Compute the weights based on the observation
+            def compute_weights(particles,particles_beta, observation, u_prev):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = kg_step(u_prev, particles[i],particles_beta[i])
+                    #right now u_pred = 0 for all entries, so we get 0/0 and nans...
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+            
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+            particles_b = initial_distribution(init_beta)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+
+                # Resample particles
+                particles = resample(particles, weights)
+                particles_b = resample(particles_b, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+                estimated_beta = np.mean(particles_b)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = kg_step(init_con, estimated_alpha, estimated_beta)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = kg_step(new_output[cur_t - 1], estimated_alpha, estimated_beta)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+            
+
+        elif type == "Sine_Gordon":
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.sin(u))
+            except:
+                return None
+            tf = self.env.generator.pde_generator.tfinals["Sine_Gordon"]
+            coeff = p.t_range/tf
+            dt = p.t_range/p.t_num
+            dx = p.x_range/p.x_num
+            dt_this = dt / (coeff * 100)
+            coeff_a = (dt_this**2) / (dx**2)
+
+            # Observation noise
+            obs_noise = 0.0005
+
+            # Process noise
+            process_noise = 0.00001
+
+            def sg_equation_step(u_prev, alpha):
+                u_next = np.copy(u_prev)
+                for i in range(1,N-1):
+                    u_next[i] = 2.0 * u_prev[i] - u_prev[i-1] + coeff_a * (u_prev[i+1] - 2.0 * u_prev[i] + u_prev[i-1]) - (dt_this**2) * alpha * np.sin(u_prev[i])
+
+                return u_next
+
+            # Compute the weights based on the observation
+            def compute_weights(particles, observation, u_prev):
+                weights = np.zeros(M)
+                for i in range(M):
+                    u_pred = sg_equation_step(u_prev, particles[i])
+                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+                return weights / np.sum(weights)
+        
+            # Initial distribution of particles
+            particles = initial_distribution(init_alpha)
+
+            # Simulate a sequence of observations
+            observations = data_input[:,:]
+
+            # Run the particle filter
+            for t in range(1, T):
+                # Propagate particles
+                particles = propagate_particles(particles,process_noise)
+                
+                # Compute weights
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+
+                # Resample particles
+                particles = resample(particles, weights)
+
+                # Estimate the state
+                estimated_alpha = np.mean(particles)
+
+            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            new_output = np.zeros((output_len + 1, N))
+            init_con = observations[-1,:]
+            new_output[0,:] = init_con[0,:]
+            for cur_t in range(len(output_t)):
+                if cur_t == 0:
+                    new_val = sg_equation_step(init_con, estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val[:,0]
+                else:
+                    new_val = sg_equation_step(new_output[cur_t - 1,:], estimated_alpha)
+                    new_output[cur_t + 1,:] = new_val
+            return new_output
+
+        else:
+            return None
+            

@@ -155,6 +155,33 @@ class ODEGenerator:
                 return self.tree_with_additional_term(type, rng)
         else:
             assert False, "Unknown mode {}".format(mode)
+    
+    def get_sympy_skeleton_tree(self, type, expr, mode = 0, rng = None):
+        """
+        Generate skeleton tree for text input, with possibly added/deleted terms
+        """
+        if expr is None:
+                    expr = getattr(self, type + "_tree_list")()
+        if mode == 0:
+            # no text noise
+            if type not in self.tree_skeletons:
+                tree_skeleton = self.equation_encoder.sympy_encoder_with_placeholder(expr)
+                self.tree_skeletons[type] = tree_skeleton
+            return self.tree_skeletons[type]
+        # Currently no deletion as PDEs only really have 2-4 terms anyway.
+        # elif mode == -1:
+        #     # term deletion
+        #     assert rng is not None
+        #     if type == "double_pendulum":
+        #         return self.double_pendulum_missing_term(type, rng)
+        #     else:
+        #         return self.tree_with_missing_term(type, rng)
+        elif mode == 1:
+            # term addition
+            assert rng is not None
+            return self.sympy_tree_with_additional_term(type, expr, rng)
+        else:
+            assert False, "Unknown mode {}".format(mode)
 
     def tree_with_additional_term(self, type, rng):
         op_list, term_list = getattr(self, type + "_tree_list")()
@@ -185,6 +212,11 @@ class ODEGenerator:
             term_list[i].insert(j, term_to_add)
         tree = self.tree_from_list(op_list, term_list)
         return self.equation_encoder.encode_with_placeholder(tree)
+    
+    def sympy_tree_with_additional_term(self, type, expr, rng):
+        term_to_add = rng.choice(self.addition_terms[self.type_to_dim[type]])
+        new_expr = expr + '+' + term_to_add
+        return self.equation_encoder.sympy_encoder_with_placeholder(new_expr)
 
     def tree_with_missing_term(self, type, rng):
         op_list, term_list = getattr(self, type + "_tree_list")()
