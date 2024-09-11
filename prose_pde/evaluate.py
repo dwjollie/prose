@@ -927,10 +927,10 @@ class Evaluator(object):
                 if self.params.use_text_refinement:
 
                     headers.append("Estimated Param Loss")
-                    table[i].append(cur_est_param_loss / max(cur_count, 1))
+                    table[i].append(sum(cur_est_param_loss) / max(cur_count, 1))
 
                     headers.append("Initial Param Loss")
-                    table[i].append(cur_init_param_loss / max(cur_count, 1))
+                    table[i].append(sum(cur_init_param_loss) / max(cur_count, 1))
 
                 # s += "{}: {:.6f}/{}  best 95 perc: {:.6f} \n ".format(
                 #     cur_type, cur_loss / max(cur_count, 1), cur_count, cur_best_loss / max(0.95 * cur_count, 1)
