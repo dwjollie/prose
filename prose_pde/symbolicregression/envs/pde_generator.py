@@ -1776,7 +1776,10 @@ class PDEGenerator(ODEGenerator):
             #term_list, op_list = self.randomize_tree(term_list, op_list)
             # Comment when not using.
             item["tree"] = self.tree_from_list(op_list, term_list)
+<<<<<<< HEAD
 
+=======
+>>>>>>> a20d179ec92677973a613c1bb19a36a9a6ec25b0
         num_initial_points = self.ICs_per_equation if train else self.eval_ICs_per_equation
 
         res = []
