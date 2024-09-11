@@ -342,6 +342,8 @@ class Evaluator(object):
         total_mean_loss = torch.zeros(len(self.types), dtype=torch.float32)
         total_l1_loss = torch.zeros(len(self.types), dtype=torch.float32)
         best_l1_loss = torch.zeros(len(self.types), dtype=torch.float32)
+        est_parameter_loss = torch.zeros(len(self.types), dtype=torch.float32)
+        init_parameter_loss = torch.zeros(len(self.types), dtype=torch.float32)
         output_list = []
         target_list = []
         type_list = []
@@ -381,6 +383,8 @@ class Evaluator(object):
         data_loss_type = [[] for _ in range(len(self.types))]
         abs_data_loss_type = [[] for _ in range(len(self.types))]
         l1_loss_type = [[] for _ in range(len(self.types))]
+        est_param_loss_type = [[] for _ in range(len(self.types))]
+        init_param_loss_type = [[] for _ in range(len(self.types))]
 
         if params.text_ode_solve:
             # use text output + ODE solver
@@ -584,6 +588,7 @@ class Evaluator(object):
                     tree_list = text_outputs[i]
                     label_outputs = None
                     valid_loss = []
+                    valid_loss_less_than_c = []
 
                     for tree in tree_list:
                         t_grid = np.linspace(0.0, self.params.t_range, self.params.t_num)
@@ -707,7 +712,7 @@ class Evaluator(object):
                                 text_valid_output += 1
                         elif params.use_text_refinement:
                             og_data = np.array(data_seqs[i][: output_len : params.eval_output_step, ..., :dim])
-                            text_data_output = self.refinement(samples["type"][i],
+                            text_data_output, estimated_coeff_ls, init_coeff_ls = self.refinement(samples["type"][i],
                                                              tree_list[0][0], 
                                                              og_data
                                                              )
@@ -734,6 +739,34 @@ class Evaluator(object):
                                     eps,
                                     params.x_range / params.x_num,
                                 )
+                                #computing a different metric between the filtered data and the original
+                                try:
+                                    error = np.sqrt(np.sum((np.array(text_data_output) - np.array(og_data)) ** 2)/ (np.sum(np.array(og_data) ** 2) + eps))
+                                    assert error<2** 200
+                                    valid_loss_less_than_c.append(error)
+                                except:
+                                    pass
+                                #compute the L2 error between coefficients
+                                tree_expr = trees[i]
+                                
+                                #start of removing systematic parts of the "trees" string of the form "[eqn]" to get eqn
+                                original_expr = ""
+                                amt_terms = len(tree_expr)
+                                terms_to_remove = [0, amt_terms, amt_terms-1]
+                                for k in range(len(tree_expr)):
+                                    if not k in terms_to_remove:
+                                        original_expr = original_expr + tree_expr[k]
+
+                                coeff_ls = self.get_coeff(samples["type"][i],original_expr)
+                                if coeff_ls is not None:
+                                    est_coeff_er = 0
+                                    init_coeff_er = 0
+                                    for i, coefficient in enumerate(coeff_ls):
+                                        est_coeff_er += np.sqrt((np.float32(estimated_coeff_ls[i]) - np.float32(coefficient)) ** 2 / (np.float32(coefficient) ** 2 + eps))
+                                        init_coeff_er += np.sqrt((np.float32(init_coeff_ls[i]) - np.float32(coefficient)) ** 2 / (np.float32(coefficient) ** 2 + eps))
+                                    est_param_loss_type[self.types_to_idx[samples["type"][i]]].append(est_coeff_er)
+                                    init_param_loss_type[self.types_to_idx[samples["type"][i]]].append(init_coeff_er)
+
                                 text_data_loss += text_rel_loss
                                 text_valid_output += 1
 
@@ -755,6 +788,7 @@ class Evaluator(object):
                     f"Output ({save_output.shape}), target ({save_target.shape}), types ({save_type.shape}) saved at: {save_file}"
                 )
 
+        valid_loss_less_than_c = np.sum(np.array(valid_loss_less_than_c))
         data_loss = np.sum(np.array(data_loss))
         abs_data_loss = np.sum(np.array(abs_data_loss))
         data_loss_first_half = np.sum(np.array(data_loss_first_half))
@@ -843,6 +877,8 @@ class Evaluator(object):
                 cur_best_l1_loss = best_l1_loss[i].item()
                 cur_mean_loss = total_mean_loss[i].item()
                 cur_l1_loss = total_l1_loss[i].item()
+                cur_est_param_loss = est_param_loss_type[i]
+                cur_init_param_loss = init_param_loss_type[i]
 
                 cur_type_indx = self.alltypes_to_idx[cur_type]
                 if np.sum(labels == cur_type_indx) != 0:
@@ -887,6 +923,14 @@ class Evaluator(object):
 
                 headers.append("prediction by mean ")
                 table[i].append(cur_mean_pred_loss)
+
+                if self.params.use_text_refinement:
+
+                    headers.append("Estimated Param Loss")
+                    table[i].append(cur_est_param_loss / max(cur_count, 1))
+
+                    headers.append("Initial Param Loss")
+                    table[i].append(cur_init_param_loss / max(cur_count, 1))
 
                 # s += "{}: {:.6f}/{}  best 95 perc: {:.6f} \n ".format(
                 #     cur_type, cur_loss / max(cur_count, 1), cur_count, cur_best_loss / max(0.95 * cur_count, 1)
@@ -983,11 +1027,12 @@ class Evaluator(object):
             )
         elif params.use_text_refinement:
             logger.info(
-                "Valid text - Data loss: {:.6f} - Data loss from text: {:.6f} - Text valid: {} - Text valid output: {}".format(
+                "Valid text - Data loss: {:.6f} - Data loss from text: {:.6f} - Text valid: {} - Text valid output: {} - Data loss less than a large number: {}".format(
                     data_loss_valid / max(text_valid_output, 1),
                     text_data_loss / max(text_valid_output, 1),
                     text_valid,
                     text_valid_output,
+                    valid_loss_less_than_c /  max(text_valid_output, 1),
                 )
             )
 
@@ -1027,7 +1072,7 @@ class Evaluator(object):
             "total_loss": loss,
             "data_loss_mean": data_loss_mean,
             "l1_loss": l1_loss,
-            "r2_loss": r2_losses,
+            "r2_loss": r2_losses
             # "best_data_loss": best_95perc_data_loss,
         }
 
@@ -1083,6 +1128,7 @@ class Evaluator(object):
         """
         Right now this doesn't work... the errors between generated data and observations is quite high. Mostly just burgers work.
         """
+
         p = self.params
         input_len = self.params.input_len
         t_eval = self.trainer.t_eval
@@ -1097,15 +1143,14 @@ class Evaluator(object):
         input_grid = self.env.generator.t_eval[0 : eval_output_start : self.params.eval_output_step]
         input_grid = np.array(input_grid)
         # Number of particles
-        # M = 5000
-        M = 0 #for PDE solve
+        M = 5000
+        # M = 0 #for PDE solve ideally
         # M = 500 #Need to lower for speed.
         # Time steps
-        T = 1
+        T = 4
         # Grid points.
         N = p.x_num
         
-        t_range = self.params.t_range
         x, t = sy.symbols('x t')
         u = sy.Function('u_0')(x,t)
 
@@ -1141,7 +1186,7 @@ class Evaluator(object):
                 expr = sy.expand(expr)
                 init_alpha = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
 
             obs_noise = 0.05
 
@@ -1161,8 +1206,6 @@ class Evaluator(object):
                 for i in range(M):
                     u_pred = heat_equation_step(u_prev, particles[i])
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
-                    if weights.all() == 0:
-                        weights[:] = 0.0000001
                 return weights / np.sum(weights)
 
 
@@ -1186,28 +1229,25 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = heat_equation_step(init_con, estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = heat_equation_step(new_output[cur_t - 1,:], estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = heat_equation_step(init_con, estimated_alpha)
+            new_output[1,:] = new_val[0,:]
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = heat_equation_step(new_output[cur_t,:], estimated_alpha)
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_alpha], [init_alpha]
         
         elif type == "porous_medium":
 
             try:
                 expr = sy.sympify(expr)
                 expr = expr.doit()
-                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                # expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
                 expr = sy.expand(expr)
             except:
-                return None
+                return None, None, None
             
             if expr.coeff(u * sy.diff(u,(x,2))) != 0:
                 init_m = expr.coeff(u*sy.diff(u,(x,2)))
@@ -1219,10 +1259,10 @@ class Evaluator(object):
                 init_m = expr.coeff(u**3 * sy.diff(u,(x,2)))
                 mode = 4
             else:
-                return None
+                return None, None, None
 
             # Observation noise
-            obs_noise = 0.05
+            obs_noise = 0.5
 
             # Process noise
             process_noise = 0.01
@@ -1249,7 +1289,7 @@ class Evaluator(object):
                 return f
         
             def pm_equation_step(u_prev, alpha):   
-                dt = p.t_range/p.t_num
+                dt = input_grid[1] - input_grid[0]
                 fun = f_closure(alpha)
                 u_next = np.copy(u_prev)
                 u_next = u_prev + fun(u_prev) * dt
@@ -1286,9 +1326,9 @@ class Evaluator(object):
                     # Estimate the state
                     estimated_m = np.mean(particles)
             except:
-                return None
+                return None, None, None
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            output_t = output_grid
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
@@ -1299,7 +1339,7 @@ class Evaluator(object):
                 else:
                     new_val = pm_equation_step(new_output[cur_t - 1,:], estimated_m)
                     new_output[cur_t + 1,:] = new_val
-            return new_output
+            return new_output, [estimated_m], [mode]
         
         elif type == "advection":
 
@@ -1309,7 +1349,7 @@ class Evaluator(object):
                 expr = sy.expand(expr)
                 init_alpha = expr.coeff(sy.diff(u,x))
             except:
-                return None
+                return None, None, None
 
             # Observation noise
             obs_noise = 0.25
@@ -1379,7 +1419,7 @@ class Evaluator(object):
                 particles = propagate_particles(particles,process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, obs_t, obs_t_minus_one, t_grid[t])
+                weights = compute_weights(particles, obs_t, obs_t_minus_one, input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1387,18 +1427,15 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = adv_step(init_con, estimated_alpha, output_t[cur_t])
-                    new_output[cur_t + 1,:] = new_val
-                else:
-                    new_val = adv_step(new_output[cur_t - 1,:], estimated_alpha, output_t[cur_t])
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = adv_step(init_con, estimated_alpha, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = adv_step(new_output[cur_t,:], estimated_alpha, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_alpha], [init_alpha]
         
         elif type == "kdv":
             try:
@@ -1407,9 +1444,9 @@ class Evaluator(object):
                 expr = sy.expand(expr)
                 init_alpha = expr.coeff(sy.diff(u,(x,3)))
             except:
-                return None
+                return None, None, None
 
-            obs_noise = 10
+            obs_noise = 2.5
 
             # Process noise
             process_noise = 0.00001
@@ -1417,8 +1454,8 @@ class Evaluator(object):
             tf = self.env.generator.pde_generator.tfinals["kdv"]
             p = self.params
             coeff = p.t_range / tf
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            dt = output_t[1] - output_t[0]
+            output_t = output_grid
+            dt = output_grid[1] - output_grid[0]
 
             # Assuming nx is even for simplicity
             kx = np.fft.fftfreq(p.x_num, d=p.x_range / p.x_num)
@@ -1468,7 +1505,10 @@ class Evaluator(object):
                     return val
 
                 u0 = np.zeros(np.size(u_prev, axis = 0))
-                u0[:] = u_prev[:,0]
+                if np.shape(u_prev) == (N,1):
+                    u0[:] = u_prev[0,:]
+                else:
+                    u0[:] = u_prev
                 uhat0 = np.fft.fft(u0)
                 vhat0 = uhat2vhat(t, uhat0)
 
@@ -1483,7 +1523,10 @@ class Evaluator(object):
                 # )
 
                 fun = vhatprime
-                vhat = np.copy(u_prev[:,0])
+                if np.shape(u_prev) == (N,1):
+                    vhat = np.copy(u_prev[:,0])
+                else:
+                    vhat = np.copy(u_prev)
                 vhat = vhat0 + fun(t,vhat) * dt
                 
                 # u = np.fft.ifft(vhat2uhat(t + dt, vhat))
@@ -1495,7 +1538,7 @@ class Evaluator(object):
                 # else:
                 #     raise ValueError
                 # except Exception as e:
-                #     return None
+                #     return None, None, None
 
                 return u
             
@@ -1522,7 +1565,7 @@ class Evaluator(object):
                 particles = propagate_particles(particles,process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t_grid[t-1])
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1530,109 +1573,106 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            new_output = np.zeros((output_len+1, N))
+            new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = kdv_step(init_con, estimated_alpha, output_t[cur_t])
-                    new_output[cur_t+1,:] = new_val
-                else:
-                    new_input = new_output[cur_t - 1, :]
-                    new_val = kdv_step(new_input[np.newaxis,:], estimated_alpha, output_t[cur_t])
-                    new_output[cur_t+1,:] = new_val
-            return new_output
+            new_val = kdv_step(init_con, estimated_alpha, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = kdv_step(new_output[cur_t,:], estimated_alpha, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_alpha], [init_alpha]
         
-        elif type == "fplanck":
-            #this has a lot of terms. Needs more time devoted to it.
-            um = 1e-6  # micrometer
-            L = 0.1 * um
-            c = 5e-21
-            try:
-                expr = sy.sympify(expr)
-                expr = sy.simplify(expr)
-                init_alpha = expr.coeff(sy.cos(x * (um/L)) * u)
-                init_beta = expr.coeff(sy.sin(x * (um/L)) * sy.diff(u,x))
-                init_gamma = expr.coeff(sy.diff(u,(x,2)))
-            except:
-                return None
+        # elif type == "fplanck":
+        #     #this has a lot of terms. Needs more time devoted to it.
+        #     um = 1e-6  # micrometer
+        #     L = 0.1 * um
+        #     c = 5e-21
+        #     try:
+        #         expr = sy.sympify(expr)
+        #         expr = sy.simplify(expr)
+        #         init_alpha = expr.coeff(sy.cos(x * (um/L)) * u)
+        #         init_beta = expr.coeff(sy.sin(x * (um/L)) * sy.diff(u,x))
+        #         init_gamma = expr.coeff(sy.diff(u,(x,2)))
+        #     except:
+        #         return None, None, None
 
-            drag = init_alpha * (L ** 2 / c)                                     #init_alpha = c/(drag * L**2)
-            drag = 1 / drag       
-            temperature = init_gamma * (- um ** 2 / (scipy.constants.k * drag))   #init_gamma = -kT/(drag um**2)  
+        #     drag = init_alpha * (L ** 2 / c)                                     #init_alpha = c/(drag * L**2)
+        #     drag = 1 / drag       
+        #     temperature = init_gamma * (- um ** 2 / (scipy.constants.k * drag))   #init_gamma = -kT/(drag um**2)  
       
-            obs_noise = 0.05
+        #     obs_noise = 0.05
 
-            # Process noise
-            process_noise = 0.01
+        #     # Process noise
+        #     process_noise = 0.01
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            dt = output_t[1] - output_t[0]
+        #     output_t = output_grid
+        #     dt = output_t[1] - output_t[0]
 
-            # Define the potential function U(x) using micrometers
-            U = lambda x: c * np.cos(x / L)
-            def fplanck_step(u_prev, temperature, drag, t):
-                # Setup the fokker_planck simulation with parameters converted to micrometers
-                sim = fokker_planck(
-                    temperature=temperature,
-                    drag=drag,
-                    extent=2 * um,
-                    # extent converted to micrometers
-                    resolution= self.env.generator.pde_generator.dx * um,  # resolution converted to micrometers
-                    boundary=boundary.periodic,
-                    potential=U,
-                )
+        #     # Define the potential function U(x) using micrometers
+        #     U = lambda x: c * np.cos(x / L)
+        #     def fplanck_step(u_prev, temperature, drag, t):
+        #         # Setup the fokker_planck simulation with parameters converted to micrometers
+        #         sim = fokker_planck(
+        #             temperature=temperature,
+        #             drag=drag,
+        #             extent=2 * um,
+        #             # extent converted to micrometers
+        #             resolution= self.env.generator.pde_generator.dx * um,  # resolution converted to micrometers
+        #             boundary=boundary.periodic,
+        #             potential=U,
+        #         )
 
-                p0 = u_prev
+        #         p0 = u_prev
                 
-                time, Pt = sim.propagate_interval(p0, (t + dt) * um, Nsteps=2)
-                print(np.shape(Pt))
-                return Pt
+        #         time, Pt = sim.propagate_interval(p0, (t + dt) * um, Nsteps=2)
+        #         print(np.shape(Pt))
+        #         return Pt
 
 
-            # Compute the weights based on the observation
-            def compute_weights(particles, particles_drag, observation, u_prev, t):
-                weights = np.zeros(M)
-                for i in range(M):
-                    u_pred = fplanck_step(u_prev, particles[i], particles_drag[i], t)
-                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
-                return weights / np.sum(weights)
+        #     # Compute the weights based on the observation
+        #     def compute_weights(particles, particles_drag, observation, u_prev, t):
+        #         weights = np.zeros(M)
+        #         for i in range(M):
+        #             u_pred = fplanck_step(u_prev, particles[i], particles_drag[i], t)
+        #             weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
+        #         return weights / np.sum(weights)
             
-            # Initial distribution of particles
-            particles = initial_distribution(temperature)
-            particles_drag = initial_distribution(drag)
+        #     # Initial distribution of particles
+        #     particles = initial_distribution(temperature)
+        #     particles_drag = initial_distribution(drag)
 
-            # Simulate a sequence of observations
-            observations = data_input[:,:]
+        #     # Simulate a sequence of observations
+        #     observations = data_input[:,:]
 
-            # Run the particle filter
-            for t in range(1, T):
-                # Propagate particles
-                particles = propagate_particles(particles, process_noise)
-                particles_drag = propagate_particles(particles_drag, process_noise)
+        #     # Run the particle filter
+        #     for t in range(1, T):
+        #         # Propagate particles
+        #         particles = propagate_particles(particles, process_noise)
+        #         particles_drag = propagate_particles(particles_drag, process_noise)
                 
-                # Compute weights
-                weights = compute_weights(particles, particles_drag, observations[t,:], observations[t-1,:], t_grid[t-1])
+        #         # Compute weights
+        #         weights = compute_weights(particles, particles_drag, observations[t,:], observations[t-1,:], t_grid[t-1])
 
-                # Resample particles
-                particles = resample(particles, weights)
-                particles_b = resample(particles_b, weights)
+        #         # Resample particles
+        #         particles = resample(particles, weights)
+        #         particles_b = resample(particles_b, weights)
 
-                # Estimate the state
-                estimated_temperature = np.mean(particles)
-                estimated_drag = np.mean(particles_drag)
+        #         # Estimate the state
+        #         estimated_temperature = np.mean(particles)
+        #         estimated_drag = np.mean(particles_drag)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            new_output = np.zeros((output_len, N))
-            init_con = observations[-1,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = fplanck_step(init_con, estimated_temperature, estimated_drag, output_t[cur_t])
-                    new_output[cur_t,:] = new_val[:,0]
-                else:
-                    new_val = fplanck_step(new_output[cur_t - 1,:], estimated_temperature,estimated_drag, output_t[cur_t])
-                    new_output[cur_t,:] = new_val
-            return new_output
+        #     output_t = output_grid
+        #     new_output = np.zeros((output_len, N))
+        #     init_con = observations[-1,:]
+        #     for cur_t in range(len(output_t)):
+        #         if cur_t == 0:
+        #             new_val = fplanck_step(init_con, estimated_temperature, estimated_drag, output_t[cur_t])
+        #             new_output[cur_t,:] = new_val[:,0]
+        #         else:
+        #             new_val = fplanck_step(new_output[cur_t - 1,:], estimated_temperature,estimated_drag, output_t[cur_t])
+        #             new_output[cur_t,:] = new_val
+        #     return new_output
 
         elif type == "diff_logisreact_1D": 
             try:
@@ -1640,30 +1680,33 @@ class Evaluator(object):
                 init_rho = expr.coeff(u*(1-u))
                 init_nu = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
 
-            obs_noise = 0.05
+            obs_noise = 5
 
             # Process noise
             process_noise = 0.01
+            process_noise_b = 0.01
+
+            IC_train = False
+            numbers = 1
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
             
-            tf = self.env.generator.pde_generator.tfinals["diff_logisreact_1D"]
-            coeff_t = p.t_range / tf
 
-            IC_train = True
-            GivenIC = None
-            numbers = 10
-            CFL = 0.35
-            def diff_logisreact_step(u_prev, rho, nu, t):
-
+            def diff_logisreact_step(u_prev, rho, nu, t_eval):
+                GivenIC = u_prev
                 uu = diff_react_1D_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range/coeff_t,
-                    self.env.generator.pde_generator.dt/coeff_t,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
@@ -1671,34 +1714,39 @@ class Evaluator(object):
                     rho,
                     nu,
                     IC_train=IC_train,
-                    GivenIC = u_prev,
+                    GivenIC=GivenIC
                 )
-            
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
 
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_nu, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = diff_logisreact_step(u_prev, particles[i], particles_nu[i], t)
+                    u_pred = diff_logisreact_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_rho)
             particles_b = initial_distribution(init_nu)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1708,18 +1756,15 @@ class Evaluator(object):
                 estimated_rho = np.mean(particles)
                 estimated_nu = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            new_output = np.zeros((output_len+1, N))
+            new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = diff_logisreact_step(init_con, estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t+1,:] = new_val[:,0]
-                else:
-                    new_val = diff_logisreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t+1,:] = new_val
-            return new_output
+            new_val = diff_logisreact_step(init_con, estimated_rho, estimated_nu, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = diff_logisreact_step(new_output[cur_t,:], estimated_rho, estimated_nu, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_rho, estimated_nu], [init_rho, init_nu]
         
         elif type == "diff_linearreact_1D": 
             try:
@@ -1727,65 +1772,74 @@ class Evaluator(object):
                 init_rho = expr.coeff(u)
                 init_nu = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
 
-            obs_noise = 0.05
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.01
-            
-            tf = self.env.generator.pde_generator.tfinals["diff_linearreact_1D"]
-            coeff_t = p.t_range/tf
-            IC_train = True
-            GivenIC = None
-            numbers = 10
-            CFL = 0.35
-            def diff_linearreact_step(u_prev, rho, nu, t):
+            process_noise = 0.001
+            process_noise_b = 0.0001
 
+            IC_train = False
+            numbers = 1
+            CFL = 0.35
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def diff_linearreact_step(u_prev, rho, nu, t_eval):
+                GivenIC = u_prev
                 uu = diff_react_1D_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range/coeff_t,
-                    self.env.generator.pde_generator.dt/coeff_t,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
                     np.random.randint(100000),
                     rho,
                     nu,
-                    react_term="linear",
+                    react_term = "linear",
                     IC_train=IC_train,
-                    GivenIC = u_prev,
+                    GivenIC=GivenIC
                 )
-            
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
 
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_nu, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = diff_linearreact_step(u_prev, particles[i], particles_nu[i], t)
+                    u_pred = diff_linearreact_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_rho)
             particles_b = initial_distribution(init_nu)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1795,18 +1849,15 @@ class Evaluator(object):
                 estimated_rho = np.mean(particles)
                 estimated_nu = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            new_output = np.zeros((output_len+1, N))
+            new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = diff_linearreact_step(init_con, estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = diff_linearreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = diff_linearreact_step(init_con, estimated_rho, estimated_nu, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = diff_linearreact_step(new_output[cur_t,:], estimated_rho, estimated_nu, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_rho, estimated_nu], [init_rho, init_nu]
         
         elif type == "diff_bistablereact_1D": 
             # Note: It is possible to add a into this.
@@ -1818,65 +1869,74 @@ class Evaluator(object):
                 init_a = expr_expanded.coeff(u) / (-init_rho)   # will return 0 if it doesn't exist
                 init_nu = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
 
-            obs_noise = 0.05
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.001
-            
-            tf = self.env.generator.pde_generator.tfinals["diff_bistablereact_1D"]
-            coeff_t = tf/p.t_range
-            IC_train = True
-            GivenIC = None
-            numbers = 10
-            CFL = 0.35
-            def diff_bistablereact_step(u_prev, rho, nu, t):
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
+            IC_train = False
+            numbers = 1
+            CFL = 0.35
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def diff_bistablereact_step(u_prev, rho, nu, t_eval):
+                GivenIC = u_prev
                 uu = diff_react_1D_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range/coeff_t,
-                    self.env.generator.pde_generator.dt/coeff_t,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
                     np.random.randint(100000),
                     rho,
                     nu,
-                    react_term="bistable",
+                    react_term = "bistable",
                     IC_train=IC_train,
-                    GivenIC = u_prev,
+                    GivenIC=GivenIC
                 )
-            
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
 
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_nu, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = diff_bistablereact_step(u_prev, particles[i], particles_nu[i], t)
+                    u_pred = diff_bistablereact_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_rho)
             particles_b = initial_distribution(init_nu)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1886,18 +1946,15 @@ class Evaluator(object):
                 estimated_rho = np.mean(particles)
                 estimated_nu = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = diff_bistablereact_step(init_con, estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = diff_bistablereact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = diff_bistablereact_step(init_con, estimated_rho, estimated_nu, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = diff_bistablereact_step(new_output[cur_t,:], estimated_rho, estimated_nu, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_rho, estimated_nu], [init_rho, init_nu]
         
         elif type == "diff_squarelogisticreact_1D": 
             try:
@@ -1905,64 +1962,74 @@ class Evaluator(object):
                 init_rho = expr.coeff(((u ** 2) * (1 - u) ** 2))
                 init_nu = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
-            
-            tf = self.env.generator.pde_generator.tfinals["diff_squarelogisticreact_1D"]
-            coeff_t = p.t_range /tf
-            IC_train = True
-            numbers = 10
-            CFL = 0.35
-            def diff_squarelogisticreact_step(u_prev, rho, nu, t):
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
+            IC_train = False
+            numbers = 1
+            CFL = 0.35
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def diff_squarelogisticreact_step(u_prev, rho, nu, t_eval):
+                GivenIC = u_prev
                 uu = diff_react_1D_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range/coeff_t,
-                    self.env.generator.pde_generator.dt /coeff_t,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
                     np.random.randint(100000),
                     rho,
                     nu,
-                    react_term="squarelogistic",
+                    react_term = "squarelogistic",
                     IC_train=IC_train,
-                    GivenIC = u_prev,
+                    GivenIC=GivenIC
                 )
-            
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
 
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_nu, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = diff_squarelogisticreact_step(u_prev, particles[i], particles_nu[i], t)
+                    u_pred = diff_squarelogisticreact_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_rho)
             particles_b = initial_distribution(init_nu)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -1972,18 +2039,15 @@ class Evaluator(object):
                 estimated_rho = np.mean(particles)
                 estimated_nu = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = diff_squarelogisticreact_step(init_con, estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = diff_squarelogisticreact_step(new_output[cur_t - 1,:], estimated_rho, estimated_nu, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = diff_squarelogisticreact_step(init_con, estimated_rho, estimated_nu, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = diff_squarelogisticreact_step(new_output[cur_t,:], estimated_rho, estimated_nu, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_rho, estimated_nu], [init_rho, init_nu]
         
         elif type == "burgers":
             try:
@@ -1992,7 +2056,7 @@ class Evaluator(object):
                 init_k = expr.coeff(u*sy.diff(u,x))
                 init_eps = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
             obs_noise = 5
 
@@ -2046,8 +2110,8 @@ class Evaluator(object):
             particles_b = initial_distribution(init_k)
 
             # ## Used in solving directly from given k, eps
-            estimated_k = np.float64(init_k)
-            estimated_eps = np.float64(init_eps)
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
             # ####
 
             # Simulate a sequence of observations
@@ -2079,7 +2143,7 @@ class Evaluator(object):
             for cur_t in range(1,len(output_grid)-1):
                 new_val = burgers_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
                 new_output[cur_t + 1,:] = new_val
-            return new_output
+            return new_output, [estimated_eps, estimated_k], [init_eps, init_k]
         
         elif type == "conservation_linearflux":
             try:
@@ -2088,29 +2152,34 @@ class Evaluator(object):
                 init_k = expr.coeff(sy.diff(u,x))
                 init_eps = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
-            
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["conservation_linearflux"]
-            coeff = p.t_range/tf
-            CFL = 0.4
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
-            def linear_flux_step(u_prev, eps, k, t):
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def cons_linear_step(u_prev, eps, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
@@ -2119,34 +2188,40 @@ class Evaluator(object):
                     k,
                     fluxx="linear",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_k, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = linear_flux_step(u_prev, particles[i], particles_k[i], t)
+                    u_pred = cons_linear_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_eps)
             particles_b = initial_distribution(init_k)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2156,50 +2231,52 @@ class Evaluator(object):
                 estimated_eps = np.mean(particles)
                 estimated_k = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = linear_flux_step(init_con, estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = linear_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = cons_linear_step(init_con, estimated_eps, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = cons_linear_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_eps, estimated_k], [init_eps, init_k]
 
         elif type == "conservation_sinflux":
     
             try:
                 expr = sy.sympify(expr)
                 expr = expr.doit()
-                init_k = expr.coeff(sy.cos(u))
+                init_k = expr.coeff(sy.cos(u) * sy.diff(u,x))
                 init_eps = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
-            
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["conservation_sinflux"]
-            coeff = p.t_range/tf
-            CFL = 0.4
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
-            def sin_flux_step(u_prev, eps, k, t):
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def cons_sinflux_step(u_prev, eps, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
@@ -2208,34 +2285,40 @@ class Evaluator(object):
                     k,
                     fluxx="sin",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_k, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = sin_flux_step(u_prev, particles[i], particles_k[i], t)
+                    u_pred = cons_sinflux_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_eps)
             particles_b = initial_distribution(init_k)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2245,50 +2328,52 @@ class Evaluator(object):
                 estimated_eps = np.mean(particles)
                 estimated_k = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = sin_flux_step(init_con, estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = sin_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = cons_sinflux_step(init_con, estimated_eps, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = cons_sinflux_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_eps, estimated_k], [init_eps, init_k]
 
         elif type == "conservation_cosflux":
     
             try:
                 expr = sy.sympify(expr)
                 expr = expr.doit()
-                init_k = expr.coeff(sy.sin(u))
+                init_k = expr.coeff(sy.sin(u) * sy.diff(u,x))
                 init_eps = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
-            
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["conservation_cosflux"]
-            coeff = p.t_range/tf
-            CFL = 0.4
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
-            def cos_flux_step(u_prev, eps, k, t):
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def cons_cosflux_step(u_prev, eps, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
@@ -2297,34 +2382,40 @@ class Evaluator(object):
                     k,
                     fluxx="cos",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_k, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = cos_flux_step(u_prev, particles[i], particles_k[i], t)
+                    u_pred = cons_cosflux_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_eps)
             particles_b = initial_distribution(init_k)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2334,18 +2425,15 @@ class Evaluator(object):
                 estimated_eps = np.mean(particles)
                 estimated_k = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = cos_flux_step(init_con, estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = cos_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = cons_cosflux_step(init_con, estimated_eps, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = cons_cosflux_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_eps, estimated_k], [init_eps, init_k]
 
         elif type == "conservation_cubicflux":
     
@@ -2355,29 +2443,34 @@ class Evaluator(object):
                 init_k = expr.coeff(u ** 2 * sy.diff(u,x))
                 init_eps = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
-            
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["conservation_cubicflux"]
-            coeff = p.t_range/tf
-            CFL = 0.4
+            process_noise = 0.01
+            process_noise_b = 0.0001
 
-            def cubic_flux_step(u_prev, eps, k, t):
+            IC_train = False
+            numbers = 1
+            mode = "copy"
+            CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
+            # output_t = np.linspace(eval_output_start, eval_output_end, output_len)
+            # t_array = np.arange(0,tf / coeff, dt / coeff)
+            # output_t = t_array[eval_output_start:eval_output_end]
+            
+
+            def cons_cubicflux_step(u_prev, eps, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
@@ -2386,34 +2479,40 @@ class Evaluator(object):
                     k,
                     fluxx="cubic",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, particles_k, observation, u_prev,t):
+            def compute_weights(particles, particles_k, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = cubic_flux_step(u_prev, particles[i], particles_k[i], t)
+                    u_pred = cons_cubicflux_step(u_prev, particles[i], particles_k[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_eps)
             particles_b = initial_distribution(init_k)
 
+            # ## Used in solving directly from given k, eps
+            # estimated_k = np.float64(init_k)
+            # estimated_eps = np.float64(init_eps)
+            # ####
+
             # Simulate a sequence of observations
             observations = data_input[:,:]
+
 
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
-                particles_b = propagate_particles(particles_b, process_noise)
+                particles_b = propagate_particles(particles_b, process_noise_b)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2423,18 +2522,15 @@ class Evaluator(object):
                 estimated_eps = np.mean(particles)
                 estimated_k = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = cubic_flux_step(init_con, estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = cubic_flux_step(new_output[cur_t - 1,:], estimated_eps, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = cons_cubicflux_step(init_con, estimated_eps, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = cons_cubicflux_step(new_output[cur_t,:], estimated_eps, estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+            return new_output, [estimated_eps, estimated_k], [init_eps, init_k]
 
         elif type == "inviscid_burgers":
     
@@ -2444,7 +2540,7 @@ class Evaluator(object):
                 init_k = expr.coeff(u*sy.diff(u,x))
                 estimated_k = np.float64(init_k)
             except:
-                return None
+                return None, None, None
 
 
             obs_noise = 5
@@ -2518,169 +2614,72 @@ class Evaluator(object):
                 new_val = inv_burgers_step(new_output[cur_t,:], estimated_k, output_grid[cur_t])
                 new_output[cur_t + 1,:] = new_val
 
-            return new_output
-        
-        elif type == "conservation_linearflux":
-            try:
-                expr = sy.sympify(expr)
-                expr = expr.doit()
-                init_k = expr.coeff(sy.diff(u,x))
-                init_eps = expr.coeff(sy.diff(u,(x,2)))
-            except:
-                return None
-
-            obs_noise = 5
-
-            # Process noise
-            process_noise = 0.1
-
-            IC_train = False
-            numbers = 128
-            mode = "copy"
-            tf = self.env.generator.pde_generator.tfinals["inviscid_burgers"]
-            coeff = p.t_range/tf
-            CFL = 0.4
-
-            the_plot = []
-
-
-            def inv_burgers_step(u_prev, k, t):
-                u_zero = np.zeros((128,128,1,1))
-                u_zero[0,:,0,0] = u_prev.transpose()
-                GivenIC = u_zero
-
-                uu = burgers_f(
-                    p.x_range,
-                    0.0,
-                    p.x_num,
-                    p.t_range / (2 * coeff),
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num // 4,
-                    CFL,
-                    numbers,
-                    20,
-                    np.random.randint(100000),
-                    0,
-                    k,
-                    viscous=False,
-                    fluxx="quadratic",
-                    IC_train=IC_train,
-                    GivenIC=GivenIC,
-                    mode=mode
-                )
-                if t == "all":
-                    return uu[:,0,:,0]
-                else:
-                    return uu[:,0,t,0]
-            
-            # Compute the weights based on the observation
-            def compute_weights(particles, observation, u_prev,t,l):
-                weights = np.zeros(M)
-                for i in range(M):
-                    u_pred = inv_burgers_step(u_prev, particles[i], t)
-                    l.append(u_pred)
-                    weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
-                return weights / np.sum(weights), l
-            
-            # Initial distribution of particles
-            particles = initial_distribution(init_k)
-
-            # Simulate a sequence of observations
-            observations = data_input[:,:]
-
-            # Run the particle filter
-            for t in range(1, T):
-                # Propagate particles
-                particles = propagate_particles(particles, process_noise)
-                
-                # Compute weights
-                weights, the_plot = compute_weights(particles, observations[t,:], observations[t-1,:], t, the_plot)
-
-                # Resample particles
-                particles = resample(particles, weights)
-
-                # Estimate the state
-                estimated_k = np.mean(particles)
-
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
-            new_output = np.zeros((output_len + 1, N))
-            init_con = observations[-1,:]
-            new_output[0,:] = init_con[0,:]
-            new_val = inv_burgers_step(init_con, estimated_eps, estimated_k, "all")
-            new_output[1:,:] = new_val.transpose()
-            for i in range(len(the_plot)):
-                plt.plot(the_plot)
-                plt.axis("off")
-            plt.show()
-
-            return new_output
+            return new_output, [estimated_k], [init_k]
 
         elif type == "inviscid_conservation_sinflux":
     
             try:
                 expr = sy.sympify(expr)
                 expr = expr.doit()
-                init_k = expr.coeff(sy.cos(u))
+                init_k = expr.coeff(sy.cos(u)*sy.diff(u,x))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
+            process_noise = 0.01
 
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_sinflux"]
-            coeff = p.t_range/tf
+            IC_train = False
+            numbers = 1
+            mode = "copy"
             CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
 
-            def inv_sin_step(u_prev, k, t):
+            def inv_sinflux_step(u_prev, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
-                    self.rng.randint(100000),
+                    np.random.randint(100000),
                     0,
                     k,
-                    viscous=False,
+                    viscous = False,
                     fluxx="sin",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, observation, u_prev,t):
+            def compute_weights(particles, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = inv_sin_step(u_prev, particles[i], t)
+                    u_pred = inv_sinflux_step(u_prev, particles[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_k)
 
             # Simulate a sequence of observations
             observations = data_input[:,:]
-
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2688,84 +2687,81 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_k = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = inv_sin_step(init_con, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = inv_sin_step(new_output[cur_t - 1], estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = inv_sinflux_step(init_con, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = inv_sinflux_step(new_output[cur_t,:], estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_k], [init_k]
 
         elif type == "inviscid_conservation_cosflux":
     
             try:
                 expr = sy.sympify(expr)
                 expr = expr.doit()
-                init_k = expr.coeff(sy.sin(u))
+                init_k = expr.coeff(sy.sin(u)*sy.diff(u,x))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
+            process_noise = 0.01
 
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_cosflux"]
-            coeff = p.t_range/tf
+            IC_train = False
+            numbers = 1
+            mode = "copy"
             CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
 
-            def inv_cos_step(u_prev, k, t):
+            def inv_cosflux_step(u_prev, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
-                    self.rng.randint(100000),
+                    np.random.randint(100000),
                     0,
                     k,
-                    viscous=False,
+                    viscous = False,
                     fluxx="cos",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, observation, u_prev,t):
+            def compute_weights(particles, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = inv_cos_step(u_prev, particles[i], t)
+                    u_pred = inv_cosflux_step(u_prev, particles[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_k)
 
             # Simulate a sequence of observations
             observations = data_input[:,:]
-
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2773,18 +2769,16 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_k = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = inv_cos_step(init_con, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = inv_cos_step(new_output[cur_t - 1], estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = inv_cosflux_step(init_con, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = inv_cosflux_step(new_output[cur_t,:], estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_k], [init_k]
 
         elif type == "inviscid_conservation_cubicflux":
     
@@ -2793,64 +2787,63 @@ class Evaluator(object):
                 expr = expr.doit()
                 init_k = expr.coeff(u ** 2 * sy.diff(u,x))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.0005
+            obs_noise = 5
 
             # Process noise
-            process_noise = 0.00001
+            process_noise = 0.01
 
-            IC_train = True
-            numbers = 10
-            mode = "periodic"
-            tf = self.env.generator.pde_generator.tfinals["inviscid_conservation_cubicflux"]
-            coeff = p.t_range/tf
+            IC_train = False
+            numbers = 1
+            mode = "copy"
             CFL = 0.4
+            dt = input_grid[1] - input_grid[0]
 
-            def inv_cubic_step(u_prev, k, t):
+            def inv_cubicflux_step(u_prev, k, t_eval):
+                GivenIC = u_prev
                 uu = burgers_f(
                     p.x_range,
                     0.0,
                     p.x_num,
-                    0.0,
-                    p.t_range / coeff,
-                    self.env.generator.pde_generator.dt / coeff,
-                    p.t_num,
+                    t_eval,
+                    t_eval + dt,
+                    dt,
+                    1,
                     CFL,
                     numbers,
                     20,
-                    self.rng.randint(100000),
+                    np.random.randint(100000),
                     0,
                     k,
-                    viscous=False,
+                    viscous = False,
                     fluxx="cubic",
                     IC_train=IC_train,
-                    GivenIC=u_prev,
+                    GivenIC=GivenIC,
                     mode=mode
                 )
-                return uu[0,t,:,0]
+                return uu[-1,:,0]
             
             # Compute the weights based on the observation
-            def compute_weights(particles, observation, u_prev,t):
+            def compute_weights(particles, observation, u_prev, t_eval):
                 weights = np.zeros(M)
                 for i in range(M):
-                    u_pred = inv_cubic_step(u_prev, particles[i], t)
+                    u_pred = inv_cubicflux_step(u_prev, particles[i], t_eval)
                     weights[i] = np.exp(-0.5 * np.sum((observation - u_pred)**2) / obs_noise**2)
                 return weights / np.sum(weights)
-            
+
             # Initial distribution of particles
             particles = initial_distribution(init_k)
 
             # Simulate a sequence of observations
             observations = data_input[:,:]
-
             # Run the particle filter
             for t in range(1, T):
                 # Propagate particles
                 particles = propagate_particles(particles, process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:], input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -2858,18 +2851,16 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_k = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = inv_cubic_step(init_con, estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = inv_cubic_step(new_output[cur_t - 1], estimated_k, cur_t)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = inv_cubicflux_step(init_con, estimated_k, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = inv_cubicflux_step(new_output[cur_t,:], estimated_k, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_k], [init_k]
 
         elif type == "cahnhilliard_1D":
             # DOES NOT INFER 6.
@@ -2877,17 +2868,17 @@ class Evaluator(object):
                 expr = sy.sympify(expr)
                 init_alpha = expr.coeff(sy.diff(u,(x,4)))
             except:
-                return None
+                return None, None, None
 
             # Observation noise
-            obs_noise = 0.0000005
+            obs_noise = 0.5
 
             # Process noise
             process_noise = 0.00000001
         
             def f_closure(eps):
 
-                def f(t, u):
+                def f(u):
                     d2u_dx2 = np.zeros_like(u)
                     rhs = np.zeros_like(u)
                     dx = p.x_range / p.x_num
@@ -2917,7 +2908,7 @@ class Evaluator(object):
                 return f
     
             def ch_equation_step(u_prev, eps):   
-                dt = p.t_range/p.t_num
+                dt = input_grid[1] - input_grid[0]
                 fun = f_closure(eps)
                 u_next = np.copy(u_prev)
                 u_next = u_prev + fun(u_prev) * dt
@@ -2951,18 +2942,16 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = ch_equation_step(init_con, estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = ch_equation_step(new_output[cur_t - 1], estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = ch_equation_step(init_con, estimated_alpha)
+            new_output[1,:] = new_val[0,:]
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = ch_equation_step(new_output[cur_t,:], estimated_alpha)
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_alpha], [init_alpha]
 
 
         elif type == "wave":
@@ -2973,9 +2962,9 @@ class Evaluator(object):
                 expr = sy.expand(expr)
                 init_alpha = expr.coeff(sy.diff(u,(x,2)))
             except:
-                return None
+                return None, None, None
     
-            obs_noise = 0.05
+            obs_noise = 0.5
 
             # Process noise
             process_noise = 0.001
@@ -3041,7 +3030,7 @@ class Evaluator(object):
                 particles = propagate_particles(particles,process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, observations[t,:], observations[t-1,:])
+                weights = compute_weights(particles, observations[t,:], observations[t-1,:],input_grid[t-1])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -3049,17 +3038,16 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = wave_step(init_con, estimated_alpha, output_t[cur_t])
-                    new_output[cur_t + 1,:] = new_val
-                else:
-                    new_val = wave_step(new_output[cur_t - 1], estimated_alpha, output_t[cur_t])
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_output[0,:] = init_con[0,:]
+            new_val = wave_step(init_con, estimated_alpha, output_grid[0])
+            new_output[1,:] = new_val
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = wave_step(new_output[cur_t,:], estimated_alpha, output_grid[cur_t])
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_alpha], [init_alpha]
 
         elif type == "Klein_Gordon":
             try:
@@ -3067,11 +3055,10 @@ class Evaluator(object):
                 init_alpha = expr.coeff(sy.diff(u,(x,2)))
                 init_beta = expr.coeff(u)
             except:
-                return None
+                return None, None, None
         
             # Observation noise
-            obs_noise_a = 0.005
-            obs_noise_b = 0.00005
+            obs_noise = 0.5
 
             # Process noise
             process_noise = 0.00001
@@ -3106,7 +3093,7 @@ class Evaluator(object):
                 particles_b = propagate_particles(particles_b, process_noise)
                 
                 # Compute weights
-                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:], t)
+                weights = compute_weights(particles, particles_b, observations[t,:], observations[t-1,:])
 
                 # Resample particles
                 particles = resample(particles, weights)
@@ -3116,18 +3103,17 @@ class Evaluator(object):
                 estimated_alpha = np.mean(particles)
                 estimated_beta = np.mean(particles_b)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = kg_step(init_con, estimated_alpha, estimated_beta)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = kg_step(new_output[cur_t - 1], estimated_alpha, estimated_beta)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = kg_step(init_con, estimated_alpha, estimated_beta)
+            new_output[1,:] = new_val[0,:]
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = kg_step(new_output[cur_t,:], estimated_alpha, estimated_beta)
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_alpha,estimated_beta], [init_alpha,init_beta]
+
             
 
         elif type == "Sine_Gordon":
@@ -3135,16 +3121,16 @@ class Evaluator(object):
                 expr = sy.sympify(expr)
                 init_alpha = expr.coeff(sy.sin(u))
             except:
-                return None
+                return None, None, None
             tf = self.env.generator.pde_generator.tfinals["Sine_Gordon"]
             coeff = p.t_range/tf
-            dt = p.t_range/p.t_num
+            dt = input_grid[1] - input_grid[0]
             dx = p.x_range/p.x_num
             dt_this = dt / (coeff * 100)
             coeff_a = (dt_this**2) / (dx**2)
 
             # Observation noise
-            obs_noise = 0.0005
+            obs_noise = 0.5
 
             # Process noise
             process_noise = 0.00001
@@ -3184,19 +3170,246 @@ class Evaluator(object):
                 # Estimate the state
                 estimated_alpha = np.mean(particles)
 
-            output_t = np.linspace(eval_output_start, eval_output_end, output_len)
             new_output = np.zeros((output_len + 1, N))
             init_con = observations[-1,:]
             new_output[0,:] = init_con[0,:]
-            for cur_t in range(len(output_t)):
-                if cur_t == 0:
-                    new_val = sg_equation_step(init_con, estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val[:,0]
-                else:
-                    new_val = sg_equation_step(new_output[cur_t - 1,:], estimated_alpha)
-                    new_output[cur_t + 1,:] = new_val
-            return new_output
+            new_val = sg_equation_step(init_con, estimated_alpha)
+            new_output[1,:] = new_val[0,:]
+            for cur_t in range(1,len(output_grid)-1):
+                new_val = sg_equation_step(new_output[cur_t,:], estimated_alpha)
+                new_output[cur_t + 1,:] = new_val
+
+            return new_output, [estimated_alpha], [init_alpha]
+
 
         else:
-            return None
+            return None, None, None
+    
+    def get_coeff(self,type,expr):
+        x,t = sy.symbols('x t')
+        u = sy.Function('u_0')(x,t)
+
+        if type == "heat":
+
+            # Initial diffusion coefficient (alpha) we want to estimate
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr) 
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+                return [init_alpha]
+            except:
+                return None
+        elif type == "porous_medium":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+            except:
+                return None
+            
+            if expr.coeff(u * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u*sy.diff(u,(x,2)))
+                mode = 2
+                return [mode]
+            elif expr.coeff(u**2 * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u**2 * sy.diff(u,(x,2)))
+                mode = 3
+                return [mode]
+            elif expr.coeff(u**3 * sy.diff(u,(x,2))) != 0:
+                init_m = expr.coeff(u**3 * sy.diff(u,(x,2)))
+                mode = 4
+                return [mode]
+            else:
+                return None
+        elif type == "advection":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,x))
+                return [init_alpha]
+            except:
+                return None
+        elif type == "kdv":
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,3)))
+                return [init_alpha]
+            except:
+                return None
+        elif type == "fplanck":
+            #this has a lot of terms. Needs more time devoted to it.
+            um = 1e-6  # micrometer
+            L = 0.1 * um
+            c = 5e-21
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)
+                init_alpha = expr.coeff(sy.cos(x * (um/L)) * u)
+                init_beta = expr.coeff(sy.sin(x * (um/L)) * sy.diff(u,x))
+                init_gamma = expr.coeff(sy.diff(u,(x,2)))
+                return [init_beta,init_gamma]
+            except:
+                return None
+        elif type == "diff_logisreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(u*(1-u))
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+                return [init_rho,init_nu]
+            except:
+                return None
+        elif type == "diff_linearreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(u)
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+                return [init_rho,init_nu]
+            except:
+                return None
+        elif type == "diff_bistablereact_1D": 
+            # Note: It is possible to add a into this.
+            try:
+                expr = sy.sympify(expr)
+                expr_expanded = sy.expand(expr)
+                expr_expanded = sy.simplify(expr_expanded)
+                init_rho = -1 * expr_expanded.coeff(u**3)       #rho u(1-u)(u-1) = -rho u**3 + rho(1+a)u**2 - a rho u
+                init_a = expr_expanded.coeff(u) / (-init_rho)   # will return 0 if it doesn't exist
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+                return [init_rho,init_nu]
+            except:
+                return None
+        elif type == "diff_squarelogisticreact_1D": 
+            try:
+                expr = sy.sympify(expr)
+                init_rho = expr.coeff(((u ** 2) * (1 - u) ** 2))
+                init_nu = expr.coeff(sy.diff(u,(x,2)))
+                return [init_rho,init_nu]
+            except:
+                return None
+        elif type == "burgers":
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u*sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+                return [init_k,init_eps]
+            except:
+                return None
+        elif type == "conservation_linearflux":
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+                return [init_k,init_eps]
+            except:
+                return None
+        elif type == "conservation_sinflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.cos(u) * sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+                return [init_k,init_eps]
+            except:
+                return None
+        elif type == "conservation_cosflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.sin(u) * sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+                return [init_k,init_eps]
+            except:
+                return None
+        elif type == "conservation_cubicflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u ** 2 * sy.diff(u,x))
+                init_eps = expr.coeff(sy.diff(u,(x,2)))
+                return [init_k,init_eps]
+            except:
+                return None
+        elif type == "inviscid_burgers":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u*sy.diff(u,x))
+                return [init_k]
+            except:
+                return None
+        elif type == "inviscid_conservation_sinflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.cos(u)*sy.diff(u,x))
+                return [init_k]
+            except:
+                return None
+        elif type == "inviscid_conservation_cosflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(sy.sin(u)*sy.diff(u,x))
+                return [init_k]
+            except:
+                return None
+        elif type == "inviscid_conservation_cubicflux":
+    
+            try:
+                expr = sy.sympify(expr)
+                expr = expr.doit()
+                init_k = expr.coeff(u ** 2 * sy.diff(u,x))
+                return [init_k]
+            except:
+                return None
+        elif type == "cahnhilliard_1D":
+            # DOES NOT INFER 6.
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,4)))
+                return [init_alpha]
+            except:
+                return None
+        elif type == "wave":
+
+            try:
+                expr = sy.sympify(expr)
+                expr = sy.simplify(expr)        #Just so it is in a form which will work with this way of doing it.
+                expr = sy.expand(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+                return [init_alpha]
+            except:
+                return None
+        elif type == "Klein_Gordon":
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.diff(u,(x,2)))
+                init_beta = expr.coeff(u)
+                return [init_alpha, init_beta]
+            except:
+                return None
+        elif type == "Sine_Gordon":
+            try:
+                expr = sy.sympify(expr)
+                init_alpha = expr.coeff(sy.sin(u))
+                return [init_alpha]
+            except:
+                return None
+            
+        
             
